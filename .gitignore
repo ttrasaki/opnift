@@ -1,0 +1,16 @@
+# Internal design notes — kept local only (mentions third parties / RetroTune /
+# private correspondence). Exclude before making the repo public.
+/docs/
+
+# Oracle / verification assets (golden WAV, S98, VGM, C++ harness).
+# Copied locally from /tmp/s98test for answer-checking; NOT persisted in the repo.
+/samples/
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# mise Python venv
+.venv/
+.mise.local.toml

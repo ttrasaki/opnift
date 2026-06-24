@@ -1,0 +1,180 @@
+/// YM2608 (OPNA) — register-level chip integration over six FM channels.
+///
+/// This wires the FM core to the Yamaha register map so a register stream (e.g. from
+/// S98) can drive it: `writeRegister(port:address:data:)` then `clock()` per sample.
+///
+/// Scope: **FM only** for now. SSG, ADPCM-A/B, the rhythm section, timers and the LFO
+/// are accepted but ignored (the addresses are decoded and dropped) so a mostly-FM
+/// stream plays. CH3 special (per-operator frequency) mode and detune are not yet
+/// modeled. These are deliberate Phase-5 omissions, not bugs.
+///
+/// Frequency: at the OPNA native FM rate `clock / 144` (~55466 Hz), a 20-bit phase
+/// accumulator advances by `(fnum << block) >> 1` per sample (derived to match A440 ≈
+/// block 4 / fnum 0x410). Per-operator MUL scales that.
+public struct OPNA {
+
+    /// Default OPNA master clock (Hz).
+    public static let defaultClock: Double = 7_987_200
+    /// Default OPNA master clock as an integer (Hz).
+    public static let defaultClockHz: UInt32 = 7_987_200
+
+    public let clock: Double
+    /// Native FM synthesis sample rate (Hz).
+    public var sampleRate: Double { clock / 144.0 }
+
+    public var channels: [FMChannel]
+
+    // Per-channel pitch state.
+    private var blockFnumHigh: [UInt8] // latched 0xA4 (block + fnum high bits)
+    private var fnum: [UInt16]
+    private var block: [UInt8]
+    // Per-operator key-scale field (KS, 0…3) for rate scaling.
+    private var keyScaleField: [[UInt8]]
+    // Stereo enables per channel.
+    public private(set) var panLeft: [Bool]
+    public private(set) var panRight: [Bool]
+
+    // EG runs at fs/3 on real OPN.
+    private var egDivider: Int = 0
+
+    /// Register address offset → logical operator. Yamaha addresses operators in the
+    /// slot order S1, S3, S2, S4.
+    private static let slotToOperator: [Int] = [0, 2, 1, 3]
+    /// F-Number top-nibble → key-code low bits (OPN key-scaling table).
+    private static let fkTable: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 3, 3]
+
+    public init(clock: Double = OPNA.defaultClock) {
+        self.clock = clock
+        channels = (0..<6).map { _ in FMChannel() }
+        blockFnumHigh = Array(repeating: 0, count: 6)
+        fnum = Array(repeating: 0, count: 6)
+        block = Array(repeating: 0, count: 6)
+        keyScaleField = Array(repeating: [0, 0, 0, 0], count: 6)
+        panLeft = Array(repeating: true, count: 6)
+        panRight = Array(repeating: true, count: 6)
+    }
+
+    // MARK: Register write
+
+    /// Write one chip register. `port` 0 drives channels 1–3, port 1 drives 4–6.
+    public mutating func writeRegister(port: Int, address: UInt8, data: UInt8) {
+        // Key on/off is a global, port-0 register that carries its own channel select.
+        if port == 0 && address == 0x28 {
+            keyOnOff(data)
+            return
+        }
+        // SSG / timer / LFO / prescaler / ADPCM live below 0x30 — decoded but ignored.
+        if address < 0x30 { return }
+
+        let column = Int(address & 0x03)
+        if column == 3 { return } // 0xX3 / 0xX7 are not valid channel columns
+        let ch = port * 3 + column
+
+        switch address & 0xF0 {
+        case 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90:
+            writeOperatorRegister(channel: ch, address: address, data: data)
+        case 0xA0:
+            writePitchRegister(channel: ch, address: address, data: data)
+        case 0xB0:
+            writeChannelRegister(channel: ch, address: address, data: data)
+        default:
+            break
+        }
+    }
+
+    private mutating func writeOperatorRegister(channel ch: Int, address: UInt8, data: UInt8) {
+        let op = OPNA.slotToOperator[Int((address >> 2) & 0x03)]
+        switch address & 0xF0 {
+        case 0x30: // DT / MUL (detune not yet modeled)
+            channels[ch].multiple[op] = data & 0x0F
+            updatePitch(ch)
+        case 0x40: // TL
+            channels[ch].totalLevel[op] = data & 0x7F
+        case 0x50: // KS / AR
+            keyScaleField[ch][op] = (data >> 6) & 0x03
+            channels[ch].envelopes[op].attackRate = data & 0x1F
+            updateKeyScale(ch, op)
+        case 0x60: // AM / D1R
+            channels[ch].envelopes[op].decayRate = data & 0x1F
+        case 0x70: // D2R
+            channels[ch].envelopes[op].sustainRate = data & 0x1F
+        case 0x80: // SL / RR
+            channels[ch].envelopes[op].releaseRate = data & 0x0F
+            channels[ch].envelopes[op].sustainLevel = (data >> 4) & 0x0F
+        default: // 0x90 SSG-EG — not modeled
+            break
+        }
+    }
+
+    private mutating func writePitchRegister(channel ch: Int, address: UInt8, data: UInt8) {
+        switch address & 0x0C {
+        case 0x00: // 0xA0–0xA2: F-Number low → commit pitch using latched high
+            fnum[ch] = (UInt16(blockFnumHigh[ch] & 0x07) << 8) | UInt16(data)
+            block[ch] = (blockFnumHigh[ch] >> 3) & 0x07
+            updatePitch(ch)
+        case 0x04: // 0xA4–0xA6: Block + F-Number high → latch only
+            blockFnumHigh[ch] = data
+        default: // 0xA8–0xAE: CH3 special mode — not modeled
+            break
+        }
+    }
+
+    private mutating func writeChannelRegister(channel ch: Int, address: UInt8, data: UInt8) {
+        switch address & 0x0C {
+        case 0x00: // 0xB0–0xB2: feedback / algorithm
+            channels[ch].algorithm = data & 0x07
+            channels[ch].feedback = (data >> 3) & 0x07
+        case 0x04: // 0xB4–0xB6: L / R / AMS / PMS
+            panLeft[ch] = (data & 0x80) != 0
+            panRight[ch] = (data & 0x40) != 0
+        default:
+            break
+        }
+    }
+
+    private mutating func keyOnOff(_ data: UInt8) {
+        let select = Int(data & 0x07)
+        // 0,1,2 → channels 0–2; 4,5,6 → channels 3–5.
+        guard (select & 0x03) != 3 else { return }
+        let ch = (select & 0x03) + ((select & 0x04) != 0 ? 3 : 0)
+        channels[ch].setKeyState(slots: data >> 4)
+    }
+
+    // MARK: Pitch helpers
+
+    private mutating func updatePitch(_ ch: Int) {
+        let base = (UInt32(fnum[ch]) << block[ch]) >> 1
+        for op in 0..<4 {
+            let mul = channels[ch].multiple[op]
+            let inc = (mul == 0) ? (base >> 1) : (base &* UInt32(mul))
+            channels[ch].operators[op].phaseIncrement = inc & Operator.phaseMask
+            updateKeyScale(ch, op)
+        }
+    }
+
+    private mutating func updateKeyScale(_ ch: Int, _ op: Int) {
+        let keycode = (UInt8(block[ch]) << 2) | OPNA.fkTable[Int(fnum[ch] >> 7)]
+        let ks = keyScaleField[ch][op]
+        channels[ch].envelopes[op].keyScale = keycode >> (3 - ks)
+    }
+
+    // MARK: Clock
+
+    /// Produce one stereo sample. L/R are unscaled sums (mixing/clamping is Phase 6).
+    public mutating func tick() -> (left: Int32, right: Int32) {
+        egDivider += 1
+        if egDivider >= 3 {
+            egDivider = 0
+            for ch in 0..<6 { channels[ch].clockEnvelopes() }
+        }
+
+        var left: Int32 = 0
+        var right: Int32 = 0
+        for ch in 0..<6 {
+            let sample = channels[ch].next()
+            if panLeft[ch] { left &+= sample }
+            if panRight[ch] { right &+= sample }
+        }
+        return (left, right)
+    }
+}
