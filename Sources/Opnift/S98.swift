@@ -77,7 +77,7 @@ public struct S98 {
 /// Drives an `OPNA` from an `S98` command stream, producing audio.
 public struct S98Player {
 
-    public private(set) var chip: OPNA
+    public var chip: OPNA
     public let song: S98
 
     public init(song: S98) {
@@ -112,8 +112,9 @@ public struct S98Player {
             }
         }
 
+        var endedNaturally = false
         stream: while left.count < target {
-            guard pos < dump.count else { break }
+            guard pos < dump.count else { endedNaturally = true; break }
             let command = dump[pos]
             pos += 1
             switch command {
@@ -134,6 +135,7 @@ public struct S98Player {
                 if let loop = song.loopIndex, loop < dump.count {
                     pos = loop
                 } else {
+                    endedNaturally = true
                     break stream
                 }
             default: // device write: even command = port 0, odd = port 1
@@ -147,9 +149,21 @@ public struct S98Player {
             }
         }
 
-        while left.count < target {
-            left.append(0)
-            right.append(0)
+        // If the song ended before `seconds`, stop near the end — render a short tail so
+        // release envelopes ring out, but don't pad the rest with silence. Looping / long
+        // songs instead simply hit `target` above.
+        if endedNaturally {
+            let tail = min(Int(2.0 * rate), target - left.count)
+            for _ in 0..<max(0, tail) {
+                let (l, r) = chip.tick()
+                left.append(l)
+                right.append(r)
+            }
+        } else {
+            while left.count < target { // reached the duration cap on a looping/long song
+                left.append(0)
+                right.append(0)
+            }
         }
         return (left, right)
     }

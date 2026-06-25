@@ -1,15 +1,18 @@
+// Ported from / modeled on ymfm (Aaron Giles), BSD-3-Clause. The increment table and
+// rate logic follow ymfm; `egInc` derives from the canonical Yamaha table (ymfm/MAME).
+// See THIRD_PARTY.
+
 /// ADSR envelope generator for one FM operator.
 ///
-/// Works in the **log-attenuation domain** (same units as the sine tables): `0` is
-/// full volume, `maxAttenuation` (0x3FF) is silence. Attack approaches `0`
-/// exponentially; decay, sustain and release add linearly toward silence — which is
-/// the perceptual shape of the Yamaha EG.
+/// Works in the **log-attenuation domain** (10-bit, same units the sine tables use):
+/// `0` is full volume, `0x3FF` is silence. This uses the canonical Yamaha OPN envelope
+/// timing (BSD ymfm / MAME lineage): a global counter gates updates, the per-rate
+/// `eg_inc` table supplies 0/1/2/4/8 attenuation steps, and attack is an exponential
+/// approach (`level += (~level · inc) >> 4`).
 ///
-/// Note on parity: the real OPN advances the envelope with a discrete 0/1/2/4/8
-/// increment table clocked by a global counter. Here the *shape and state machine*
-/// are faithful, but the per-clock increment policy is a smooth approximation. Exact
-/// sample parity vs ymfm is deferred to chip integration, where it can be diffed
-/// against golden; the state machine and API stay the same when that swap happens.
+/// The generator is clocked by `clock(_:)` with a shared, monotonically increasing EG
+/// counter (the chip advances it at fs/3). Update cadence and step size both come from
+/// the effective rate, so decay/sustain/release times track real hardware.
 public struct EnvelopeGenerator {
 
     public enum State: Equatable {
@@ -32,113 +35,139 @@ public struct EnvelopeGenerator {
     public var releaseRate: UInt8 = 15
     /// Sustain level (SL), 4-bit (0…15). 15 maps to maximum attenuation.
     public var sustainLevel: UInt8 = 0
-    /// Rate key-scale contribution from the key code (0…3), added to every rate.
+    /// Rate key-scale contribution from the key code, added to every rate.
     public var keyScale: UInt8 = 0
 
     // MARK: State
 
     public static let maxAttenuation: UInt16 = 0x3FF
 
-    private static let scaleBits: UInt32 = 8
-    private static let maxLevel: UInt32 = UInt32(maxAttenuation) << scaleBits
-
-    /// Internal high-resolution level (10-bit attenuation << scaleBits). 0 = loud.
-    private var level: UInt32 = EnvelopeGenerator.maxLevel
+    /// 10-bit attenuation as a signed value (Int32 so attack's `~level` math works).
+    private var level: Int32 = Int32(EnvelopeGenerator.maxAttenuation)
     public private(set) var state: State = .off
 
     public init() {}
 
     /// Current 10-bit attenuation (0 = full volume, 0x3FF = silence).
     public var attenuation: UInt16 {
-        UInt16(min(level >> EnvelopeGenerator.scaleBits, UInt32(EnvelopeGenerator.maxAttenuation)))
+        UInt16(min(max(level, 0), Int32(EnvelopeGenerator.maxAttenuation)))
     }
 
-    /// Whether the operator is currently producing (or releasing) sound.
     public var isActive: Bool { state != .off }
 
     // MARK: Gate
 
-    /// Key-on: (re)start the attack from the current level.
-    public mutating func keyOn() {
-        state = .attack
-    }
+    public mutating func keyOn() { state = .attack }
 
-    /// Key-off: enter the release phase if currently sounding.
     public mutating func keyOff() {
-        if state != .off {
-            state = .release
-        }
+        if state != .off { state = .release }
     }
 
     // MARK: Clock
 
-    /// Advance the envelope by one EG clock.
-    public mutating func clock() {
+    /// Advance the envelope, gated by the shared EG counter.
+    public mutating func clock(_ egCounter: UInt32) {
+        guard state != .off else { return }
+
+        let rate: Int
         switch state {
-        case .off:
+        case .attack:  rate = Int(effectiveRate(attackRate))
+        case .decay:   rate = Int(effectiveRate(decayRate))
+        case .sustain: rate = Int(effectiveRate(sustainRate))
+        case .release: rate = Int(releaseEffectiveRate())
+        case .off:     return
+        }
+
+        // Attack rates 62/63 snap straight to peak.
+        if state == .attack && rate >= 62 {
+            level = 0
+            state = .decay
             return
+        }
 
+        let shift = rate < 48 ? (11 - (rate >> 2)) : 0
+        guard egCounter & ((1 << shift) - 1) == 0 else { return }
+        let phase = Int((egCounter >> shift) & 7)
+        let inc = Int32(EnvelopeGenerator.egInc[EnvelopeGenerator.egRow(rate) * 8 + phase])
+
+        switch state {
         case .attack:
-            let inc = EnvelopeGenerator.linearIncrement(forRate: effectiveRate(attackRate))
-            // Exponential approach: step shrinks as we near 0, but never stalls.
-            let proportional = (level >> 5) &* inc >> 6
-            let step = max(proportional, inc)
-            if step >= level {
-                level = 0
-                state = .decay
-            } else {
-                level -= step
+            if inc != 0 {
+                level += (~level &* inc) >> 4 // exponential approach to 0
+                if level <= 0 {
+                    level = 0
+                    state = .decay
+                }
             }
-
         case .decay:
-            let target = EnvelopeGenerator.sustainTargetLevel(sustainLevel)
-            level = min(level &+ EnvelopeGenerator.linearIncrement(forRate: effectiveRate(decayRate)), target)
-            if level >= target {
+            level += inc
+            if level >= sustainThreshold {
                 state = .sustain
             }
-
+            if level > Int32(EnvelopeGenerator.maxAttenuation) {
+                level = Int32(EnvelopeGenerator.maxAttenuation)
+            }
         case .sustain:
-            level = min(level &+ EnvelopeGenerator.linearIncrement(forRate: effectiveRate(sustainRate)),
-                        EnvelopeGenerator.maxLevel)
-
+            level = min(level + inc, Int32(EnvelopeGenerator.maxAttenuation))
         case .release:
-            level = min(level &+ EnvelopeGenerator.linearIncrement(forRate: releaseEffectiveRate()),
-                        EnvelopeGenerator.maxLevel)
-            if level >= EnvelopeGenerator.maxLevel {
+            level += inc
+            if level >= Int32(EnvelopeGenerator.maxAttenuation) {
+                level = Int32(EnvelopeGenerator.maxAttenuation)
                 state = .off
             }
+        case .off:
+            break
         }
     }
 
     // MARK: Rate helpers
 
-    /// Effective rate for a 5-bit register field: `min(63, 2·rate + keyScale)`.
     @inline(__always)
     func effectiveRate(_ raw: UInt8) -> UInt8 {
         UInt8(min(63, 2 * Int(raw) + Int(keyScale)))
     }
 
-    /// Effective release rate: RR is 4-bit, expanded to a 5-bit `(RR<<1)|1` first.
     @inline(__always)
     func releaseEffectiveRate() -> UInt8 {
         effectiveRate((releaseRate << 1) | 1)
     }
 
-    /// Per-clock attenuation increment (in 1/256 units) for an effective rate 0…63.
-    /// Doubles every 4 rate steps; the low two bits interpolate between doublings.
-    @inline(__always)
-    static func linearIncrement(forRate rate: UInt8) -> UInt32 {
-        let r = min(rate, 63)
-        if r < 4 { return 0 } // rates 0–3 effectively never advance
-        let base = UInt32(1) << (r >> 2)
-        let frac = base &* UInt32(r & 3) / 4
-        return base &+ frac
+    /// Attenuation (10-bit) at which decay hands off to sustain. SL 15 → silence.
+    private var sustainThreshold: Int32 {
+        sustainLevel >= 15 ? Int32(EnvelopeGenerator.maxAttenuation) : Int32(sustainLevel) << 5
     }
 
-    /// Target level (high-res) where decay hands off to sustain. SL 15 → silence.
+    // MARK: Canonical OPN envelope increment table (BSD ymfm / MAME lineage)
+
+    /// `eg_inc[19 × 8]`: per-rate-group, per-phase attenuation step (0/1/2/4/8).
+    static let egInc: [UInt8] = [
+        0, 1, 0, 1, 0, 1, 0, 1, // 0: rates < 48, low bits 0
+        0, 1, 0, 1, 1, 1, 0, 1, // 1: rates < 48, low bits 1
+        0, 1, 1, 1, 0, 1, 1, 1, // 2: rates < 48, low bits 2
+        0, 1, 1, 1, 1, 1, 1, 1, // 3: rates < 48, low bits 3
+        1, 1, 1, 1, 1, 1, 1, 1, // 4: rate 48
+        1, 1, 1, 2, 1, 1, 1, 2, // 5: rate 49
+        1, 2, 1, 2, 1, 2, 1, 2, // 6: rate 50
+        1, 2, 2, 2, 1, 2, 2, 2, // 7: rate 51
+        2, 2, 2, 2, 2, 2, 2, 2, // 8: rate 52
+        2, 2, 2, 4, 2, 2, 2, 4, // 9: rate 53
+        2, 4, 2, 4, 2, 4, 2, 4, // 10: rate 54
+        2, 4, 4, 4, 2, 4, 4, 4, // 11: rate 55
+        4, 4, 4, 4, 4, 4, 4, 4, // 12: rate 56
+        4, 4, 4, 8, 4, 4, 4, 8, // 13: rate 57
+        4, 8, 4, 8, 4, 8, 4, 8, // 14: rate 58
+        4, 8, 8, 8, 4, 8, 8, 8, // 15: rate 59
+        8, 8, 8, 8, 8, 8, 8, 8, // 16: rates 60–63 (max step)
+        8, 8, 8, 8, 8, 8, 8, 8, // 17: (mirror of 16)
+        0, 0, 0, 0, 0, 0, 0, 0, // 18: never (unused here)
+    ]
+
+    /// Map an effective rate (0…63) to its `eg_inc` row.
     @inline(__always)
-    static func sustainTargetLevel(_ sustainLevel: UInt8) -> UInt32 {
-        let atten = (sustainLevel >= 15) ? UInt32(maxAttenuation) : UInt32(sustainLevel) << 5
-        return atten << scaleBits
+    static func egRow(_ rate: Int) -> Int {
+        if rate < 48 { return rate & 3 }     // rows 0–3 (0/1 pattern, slowed by shift)
+        let high = rate >> 2
+        if high >= 15 { return 16 }          // rates 60–63 → max step
+        return 4 + (high - 12) * 4 + (rate & 3)
     }
 }

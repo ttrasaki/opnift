@@ -14,7 +14,7 @@ struct FMChannelTests {
         ch.totalLevel = totalLevel
         for i in 0..<4 { ch.operators[i].phaseIncrement = 1 << Operator.waveformShift }
         ch.keyOn()
-        for _ in 0..<256 { ch.clockEnvelopes() }
+        for c in 0..<UInt32(256) { ch.clockEnvelopes(c) }
         for env in ch.envelopes { #expect(env.attenuation == 0) }
         return ch
     }

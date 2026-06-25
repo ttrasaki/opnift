@@ -23,6 +23,23 @@ public struct OPNA {
     public var sampleRate: Double { clock / 144.0 }
 
     public var channels: [FMChannel]
+    /// The SSG (square-wave) side of the chip.
+    public var ssg = SSG()
+    /// SSG → FM mix level. 0.5 normalizes the SSG's 14-bit amplitude table down to the
+    /// FM operators' 13-bit range, which matches the golden FM:SSG balance (gain ≈ 0 dB).
+    public var ssgVolume: Double = 0.5
+    /// FM mix level (1 = normal). Mainly for isolating SSG vs FM during analysis.
+    public var fmVolume: Double = 1.0
+
+    /// SSG runs at master / 8; FM at master / 144 → 18 SSG clocks per FM sample.
+    private static let ssgClocksPerSample = 18
+    // Anti-aliasing low-pass for the SSG stream (square/noise are harmonically rich, so
+    // decimating master/8 → master/144 aliases badly without a real filter). 4th order.
+    private var ssgLowpass1 = Biquad()
+    private var ssgLowpass2 = Biquad()
+    // AC-couple the final output (the chip's analog output is DC-blocked).
+    private var dcBlockL = DCBlocker()
+    private var dcBlockR = DCBlocker()
 
     // Per-channel pitch state.
     private var blockFnumHigh: [UInt8] // latched 0xA4 (block + fnum high bits)
@@ -30,18 +47,39 @@ public struct OPNA {
     private var block: [UInt8]
     // Per-operator key-scale field (KS, 0…3) for rate scaling.
     private var keyScaleField: [[UInt8]]
+    // Per-operator detune field (DT, 0…7: bit 2 = sign, bits 0–1 = amount).
+    private var detuneField: [[UInt8]]
     // Stereo enables per channel.
     public private(set) var panLeft: [Bool]
     public private(set) var panRight: [Bool]
 
     // EG runs at fs/3 on real OPN.
     private var egDivider: Int = 0
+    private var egCounter: UInt32 = 0
 
     /// Register address offset → logical operator. Yamaha addresses operators in the
     /// slot order S1, S3, S2, S4.
     private static let slotToOperator: [Int] = [0, 2, 1, 3]
     /// F-Number top-nibble → key-code low bits (OPN key-scaling table).
     private static let fkTable: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 3, 3]
+
+    /// Detune table `[amount 0…3][keycode 0…31]`: phase-increment offset in our 20-bit
+    /// phase units. The values are the canonical Yamaha `dt_tab` from MAME (via ymfm);
+    /// the key-code/KSR logic is likewise ported from ymfm. BSD-3-Clause; see THIRD_PARTY.
+    private static let detuneTable: [UInt8] = [
+        // amount 0 (no detune)
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        // amount 1
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2,
+        2, 3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7, 8, 8, 8, 8,
+        // amount 2
+        1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5,
+        5, 6, 6, 7, 8, 8, 9, 10, 11, 12, 13, 14, 16, 16, 16, 16,
+        // amount 3
+        2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7,
+        8, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 20, 22, 22, 22, 22,
+    ]
 
     public init(clock: Double = OPNA.defaultClock) {
         self.clock = clock
@@ -50,8 +88,22 @@ public struct OPNA {
         fnum = Array(repeating: 0, count: 6)
         block = Array(repeating: 0, count: 6)
         keyScaleField = Array(repeating: [0, 0, 0, 0], count: 6)
+        detuneField = Array(repeating: [0, 0, 0, 0], count: 6)
         panLeft = Array(repeating: true, count: 6)
         panRight = Array(repeating: true, count: 6)
+
+        // SSG anti-alias filter runs at the SSG clock rate (master / 8).
+        let ssgRate = clock / 8.0
+        setSSGCutoff(6000)
+        dcBlockL.configure(cutoff: 10, sampleRate: sampleRate)
+        dcBlockR.configure(cutoff: 10, sampleRate: sampleRate)
+    }
+
+    /// Reconfigure the SSG anti-alias / tone-shaping low-pass cutoff (Hz).
+    public mutating func setSSGCutoff(_ cutoff: Double) {
+        let ssgRate = clock / 8.0
+        ssgLowpass1.setLowpass(cutoff: cutoff, sampleRate: ssgRate)
+        ssgLowpass2.setLowpass(cutoff: cutoff, sampleRate: ssgRate)
     }
 
     // MARK: Register write
@@ -63,7 +115,12 @@ public struct OPNA {
             keyOnOff(data)
             return
         }
-        // SSG / timer / LFO / prescaler / ADPCM live below 0x30 — decoded but ignored.
+        // SSG registers (port 0, 0x00–0x0F).
+        if port == 0 && address < 0x10 {
+            ssg.writeRegister(address, data)
+            return
+        }
+        // Timer / LFO / prescaler / ADPCM live below 0x30 — decoded but ignored.
         if address < 0x30 { return }
 
         let column = Int(address & 0x03)
@@ -85,8 +142,9 @@ public struct OPNA {
     private mutating func writeOperatorRegister(channel ch: Int, address: UInt8, data: UInt8) {
         let op = OPNA.slotToOperator[Int((address >> 2) & 0x03)]
         switch address & 0xF0 {
-        case 0x30: // DT / MUL (detune not yet modeled)
+        case 0x30: // DT / MUL
             channels[ch].multiple[op] = data & 0x0F
+            detuneField[ch][op] = (data >> 4) & 0x07
             updatePitch(ch)
         case 0x40: // TL
             channels[ch].totalLevel[op] = data & 0x7F
@@ -143,10 +201,16 @@ public struct OPNA {
     // MARK: Pitch helpers
 
     private mutating func updatePitch(_ ch: Int) {
-        let base = (UInt32(fnum[ch]) << block[ch]) >> 1
+        let base = Int32((UInt32(fnum[ch]) << block[ch]) >> 1)
+        let keycode = Int((UInt8(block[ch]) << 2) | OPNA.fkTable[Int(fnum[ch] >> 7)])
         for op in 0..<4 {
+            // Detune nudges the phase increment a few units around the base frequency.
+            let field = detuneField[ch][op]
+            let detune = Int32(OPNA.detuneTable[Int(field & 3) * 32 + keycode])
+            let detuned = max((field & 4) != 0 ? base - detune : base + detune, 0)
+            // MUL multiplies after detune (MUL 0 means ×0.5).
             let mul = channels[ch].multiple[op]
-            let inc = (mul == 0) ? (base >> 1) : (base &* UInt32(mul))
+            let inc = (mul == 0) ? (UInt32(detuned) >> 1) : (UInt32(detuned) &* UInt32(mul))
             channels[ch].operators[op].phaseIncrement = inc & Operator.phaseMask
             updateKeyScale(ch, op)
         }
@@ -165,7 +229,8 @@ public struct OPNA {
         egDivider += 1
         if egDivider >= 3 {
             egDivider = 0
-            for ch in 0..<6 { channels[ch].clockEnvelopes() }
+            egCounter &+= 1
+            for ch in 0..<6 { channels[ch].clockEnvelopes(egCounter) }
         }
 
         var left: Int32 = 0
@@ -175,6 +240,24 @@ public struct OPNA {
             if panLeft[ch] { left &+= sample }
             if panRight[ch] { right &+= sample }
         }
+        if fmVolume != 1.0 {
+            left = Int32(Double(left) * fmVolume)
+            right = Int32(Double(right) * fmVolume)
+        }
+
+        // SSG runs faster; low-pass the stream (anti-alias) then point-sample at FM rate.
+        var filtered = 0.0
+        for _ in 0..<OPNA.ssgClocksPerSample {
+            ssg.clock()
+            filtered = ssgLowpass2.process(ssgLowpass1.process(Double(ssg.output())))
+        }
+        let ssgSample = Int32(filtered * ssgVolume)
+        left &+= ssgSample
+        right &+= ssgSample
+
+        // AC-couple (remove the SSG's DC offset / envelope shadow), like the real output.
+        left = Int32(dcBlockL.process(Double(left)))
+        right = Int32(dcBlockR.process(Double(right)))
         return (left, right)
     }
 }

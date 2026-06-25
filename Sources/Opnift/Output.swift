@@ -8,24 +8,33 @@ public func clampToInt16(_ value: Int32) -> Int16 {
     return Int16(value)
 }
 
-/// Linear resampler from one rate to another.
+/// Catmull-Rom cubic resampler from one rate to another.
 ///
-/// This is the simplest correct resampler and the seam where Phase 1.5 swaps in a
-/// polyphase / output-rate fractional resampler to shape the high end toward fmgen.
-/// Kept linear for now so the output path works end-to-end and feeds `compare.py`.
+/// Replaces the earlier linear version. Cubic interpolation preserves high-frequency
+/// content much better than linear, which matters most when upsampling from a low
+/// native rate (e.g. OPN at 27 kHz → 44.1 kHz output). The seam where Phase 1.5
+/// swaps in a polyphase / output-rate fractional resampler to fully shape the high
+/// end toward fmgen.
 public func resampleLinear(_ input: [Int32], inputRate: Double, outputRate: Double) -> [Int32] {
     if input.isEmpty || inputRate == outputRate { return input }
     let ratio = inputRate / outputRate
     let outputCount = Int(Double(input.count) / ratio)
     var output = [Int32]()
     output.reserveCapacity(outputCount)
+    let last = input.count - 1
     for i in 0..<outputCount {
         let position = Double(i) * ratio
-        let index = Int(position)
-        let frac = position - Double(index)
-        let a = Double(input[index])
-        let b = index + 1 < input.count ? Double(input[index + 1]) : a
-        output.append(Int32((a + (b - a) * frac).rounded()))
+        let idx = Int(position)
+        let t = position - Double(idx)
+        let p0 = Double(input[max(idx - 1, 0)])
+        let p1 = Double(input[idx])
+        let p2 = Double(input[min(idx + 1, last)])
+        let p3 = Double(input[min(idx + 2, last)])
+        // Catmull-Rom coefficients
+        let c1 = (p2 - p0) * 0.5
+        let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3
+        let c3 = (p3 - p0) * 0.5 + 1.5 * (p1 - p2)
+        output.append(Int32((((c3 * t + c2) * t + c1) * t + p1).rounded()))
     }
     return output
 }

@@ -38,7 +38,7 @@ struct TablesTests {
     @Test("attenuationToVolume: zero attenuation is near full scale and halves per octave")
     func attenuationToVolume() {
         let full = OpnTables.attenuationToVolume(0)
-        #expect(full == 2042)
+        #expect(full == 8168) // 13-bit: (exp[255] | 0x400) << 2
         // Each 0x100 of attenuation is one octave (a halving).
         #expect(OpnTables.attenuationToVolume(0x100) == full / 2)
         #expect(OpnTables.attenuationToVolume(0x200) == full / 4)

@@ -14,3 +14,5 @@ Package.resolved
 # mise Python venv
 .venv/
 .mise.local.toml
+
+.DS_Store

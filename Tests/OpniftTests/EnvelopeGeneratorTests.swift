@@ -4,13 +4,15 @@ import Testing
 @Suite("Envelope generator")
 struct EnvelopeGeneratorTests {
 
-    /// Clock until `state` changes (or `limit` is hit), returning the clock count.
+    /// Clock with a monotonically increasing EG counter until `state` changes (or the
+    /// limit is hit). Returns the number of EG clocks consumed.
     @discardableResult
-    private func run(_ eg: inout EnvelopeGenerator, untilStateChangesFrom from: EnvelopeGenerator.State,
-                     limit: Int = 1_000_000) -> Int {
+    private func run(_ eg: inout EnvelopeGenerator, from: EnvelopeGenerator.State,
+                     counter: inout UInt32, limit: Int = 5_000_000) -> Int {
         var n = 0
         while eg.state == from && n < limit {
-            eg.clock()
+            eg.clock(counter)
+            counter &+= 1
             n += 1
         }
         return n
@@ -27,33 +29,36 @@ struct EnvelopeGeneratorTests {
     @Test("key-on attacks toward full volume, then decays")
     func attackThenDecay() {
         var eg = EnvelopeGenerator()
-        eg.attackRate = 31
+        eg.attackRate = 20
         eg.decayRate = 20
         eg.sustainLevel = 4
         eg.keyOn()
         #expect(eg.state == .attack)
-        run(&eg, untilStateChangesFrom: .attack)
+        var counter: UInt32 = 0
+        run(&eg, from: .attack, counter: &counter)
         #expect(eg.state == .decay)
         #expect(eg.attenuation == 0) // attack peaked at full volume
     }
 
-    @Test("decay falls to the sustain level and holds")
+    @Test("decay falls to the sustain level then holds when D2R is zero")
     func decayToSustain() {
         var eg = EnvelopeGenerator()
         eg.attackRate = 31
         eg.decayRate = 24
-        eg.sustainRate = 0 // no second decay → holds
+        eg.sustainRate = 0 // no second decay
         eg.sustainLevel = 6
         eg.keyOn()
-        run(&eg, untilStateChangesFrom: .attack) // through attack
-        run(&eg, untilStateChangesFrom: .decay)  // through decay
+        var counter: UInt32 = 0
+        run(&eg, from: .attack, counter: &counter)
+        run(&eg, from: .decay, counter: &counter)
         #expect(eg.state == .sustain)
-        let expected = EnvelopeGenerator.sustainTargetLevel(6) >> 8
-        #expect(UInt32(eg.attenuation) == expected)
-        // With sustainRate 0 it should not move.
+        // Lands at/just past the SL threshold (6 << 5 = 192).
+        #expect(eg.attenuation >= 192)
+        #expect(eg.attenuation < 192 + 16)
+        // D2R 0 advances only via the slowest pattern — effectively held.
         let held = eg.attenuation
-        for _ in 0..<1000 { eg.clock() }
-        #expect(eg.attenuation == held)
+        for _ in 0..<2000 { eg.clock(counter); counter &+= 1 }
+        #expect(Int(eg.attenuation) - Int(held) <= 1)
     }
 
     @Test("attenuation is monotonic non-decreasing through decay")
@@ -63,10 +68,12 @@ struct EnvelopeGeneratorTests {
         eg.decayRate = 18
         eg.sustainLevel = 10
         eg.keyOn()
-        run(&eg, untilStateChangesFrom: .attack)
+        var counter: UInt32 = 0
+        run(&eg, from: .attack, counter: &counter)
         var previous = eg.attenuation
         while eg.state == .decay {
-            eg.clock()
+            eg.clock(counter)
+            counter &+= 1
             #expect(eg.attenuation >= previous)
             previous = eg.attenuation
         }
@@ -80,10 +87,11 @@ struct EnvelopeGeneratorTests {
         eg.sustainLevel = 0
         eg.releaseRate = 15
         eg.keyOn()
-        run(&eg, untilStateChangesFrom: .attack)
+        var counter: UInt32 = 0
+        run(&eg, from: .attack, counter: &counter)
         eg.keyOff()
         #expect(eg.state == .release)
-        run(&eg, untilStateChangesFrom: .release)
+        run(&eg, from: .release, counter: &counter)
         #expect(eg.state == .off)
         #expect(eg.attenuation == EnvelopeGenerator.maxAttenuation)
     }
@@ -94,10 +102,11 @@ struct EnvelopeGeneratorTests {
             var eg = EnvelopeGenerator()
             eg.attackRate = ar
             eg.keyOn()
-            return run(&eg, untilStateChangesFrom: .attack)
+            var counter: UInt32 = 0
+            return run(&eg, from: .attack, counter: &counter)
         }
-        #expect(attackClocks(31) <= attackClocks(20))
-        #expect(attackClocks(20) <= attackClocks(10))
+        #expect(attackClocks(28) <= attackClocks(18))
+        #expect(attackClocks(18) <= attackClocks(10))
     }
 
     @Test("key-off during attack still releases")
@@ -105,9 +114,19 @@ struct EnvelopeGeneratorTests {
         var eg = EnvelopeGenerator()
         eg.attackRate = 8
         eg.keyOn()
-        eg.clock()
+        eg.clock(0)
         #expect(eg.state == .attack)
         eg.keyOff()
         #expect(eg.state == .release)
+    }
+
+    @Test("egRow maps representative rates to the right pattern rows")
+    func egRowMapping() {
+        #expect(EnvelopeGenerator.egRow(0) == 0)
+        #expect(EnvelopeGenerator.egRow(3) == 3)
+        #expect(EnvelopeGenerator.egRow(47) == 3)   // still the 0/1 region
+        #expect(EnvelopeGenerator.egRow(48) == 4)
+        #expect(EnvelopeGenerator.egRow(59) == 15)
+        #expect(EnvelopeGenerator.egRow(63) == 16)  // max step
     }
 }

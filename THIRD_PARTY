@@ -1,0 +1,67 @@
+Third-party notices
+===================
+
+Opnift is a pure-Swift OPN/OPNA (YM2203 / YM2608) implementation. Its FM and SSG
+cores were written by porting and closely following **ymfm** by Aaron Giles, and
+therefore constitute a derivative work of ymfm. ymfm is distributed under the
+BSD 3-Clause License, whose terms require that its copyright notice be retained;
+that notice is reproduced in full below.
+
+Specifically, the following parts of Opnift are ported from or modeled directly
+on ymfm (file references are to ymfm's `src/ymfm_fm.ipp`, `ymfm_opn.cpp`,
+`ymfm_ssg.cpp`):
+
+  * The log-sin / exp attenuation pipeline and `attenuation_to_volume`
+    (Sources/Opnift/Tables.swift, Operator.swift)
+  * The envelope generator: state machine, attack formula, rate/increment logic,
+    sustain-level and effective-rate computation
+    (Sources/Opnift/EnvelopeGenerator.swift)
+  * The 4-operator algorithm routing, phase modulation and feedback
+    (Sources/Opnift/FMChannel.swift)
+  * Key-code / KSR and the detune table (`dt_tab`)
+    (Sources/Opnift/OPNA.swift)
+  * The SSG tone/noise/mixer model and the volume-to-amplitude table
+    (Sources/Opnift/SSG.swift)
+
+Two tables — the detune table (`dt_tab`) and the SSG volume-to-amplitude table
+(`s_amplitudes`) — are noted by ymfm as originating from MAME's FM/SSG
+implementation (Jarek Burczynski and Tatsuyuki Satoh). MAME's `fmopn` code is
+likewise distributed under permissive (BSD-3-Clause) terms.
+
+No code from **fmgen** (cisc) was used. fmgen's rendered audio output was used
+only as a reference target for measurement/comparison; none of its source was
+read or copied.
+
+-------------------------------------------------------------------------------
+ymfm — https://github.com/aaronsgiles/ymfm
+-------------------------------------------------------------------------------
+
+BSD 3-Clause License
+
+Copyright (c) 2021, Aaron Giles
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

@@ -18,7 +18,7 @@ struct OperatorTests {
     func approximatesSine() {
         var op = Operator()
         op.phaseIncrement = 1 << Operator.waveformShift // 1024 samples / cycle
-        let scale = 2042.0
+        let scale = 8168.0 // 13-bit full scale
         var maxError = 0.0
         for i in 0..<1024 {
             let actual = Double(op.next())
@@ -27,7 +27,7 @@ struct OperatorTests {
             let expected = sin((Double(i) + 0.5) * 2.0 * .pi / 1024.0) * scale
             maxError = max(maxError, abs(actual - expected))
         }
-        #expect(maxError < 8.0) // a few LSB out of ~2042 full scale
+        #expect(maxError < 32.0) // a few LSB out of ~8168 full scale
     }
 
     @Test("DC offset over a full cycle is zero")

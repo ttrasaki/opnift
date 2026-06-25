@@ -1,5 +1,7 @@
 import Foundation
 
+// Ported from / modeled on ymfm (Aaron Giles), BSD-3-Clause. See THIRD_PARTY.
+
 /// Core lookup tables for the OPN/OPNA FM operator.
 ///
 /// FM synthesis in the Yamaha OPN family works in the **logarithmic (attenuation)
@@ -51,14 +53,17 @@ public enum OpnTables {
     /// Convert a total attenuation (log domain) back to a linear amplitude.
     ///
     /// Low 8 bits = fractional attenuation (inverted index into `exp`), high bits =
-    /// integer octaves of attenuation (a right shift). Result is an unsigned magnitude
-    /// with ~13 bits of range; `attenuationToVolume(0) == 2042` (near full scale).
+    /// integer octaves of attenuation (a right shift). Result is a 13-bit unsigned
+    /// magnitude; `attenuationToVolume(0) == 8168` (near full scale).
     @inline(__always)
     public static func attenuationToVolume(_ attenuation: UInt32) -> UInt16 {
         let octaves = Int(attenuation >> 8)
-        if octaves >= 12 { return 0 } // mantissa is ~11-bit; beyond this it's silence
+        if octaves >= 13 { return 0 } // mantissa is 13-bit; beyond this it's silence
         let fractional = Int((attenuation & 0xff) ^ 0xff)
-        let mantissa = UInt32(exp[fractional] | 0x400) // restore implied leading 1
+        // ymfm: ((mantissa | 0x400) << 2) — restore the implied leading 1, then scale to
+        // a 13-bit linear volume so the operator output (and thus FM modulation) has the
+        // full hardware range. `attenuationToVolume(0) == 8168`.
+        let mantissa = (UInt32(exp[fractional]) | 0x400) << 2
         return UInt16(mantissa >> octaves)
     }
 }

@@ -1,3 +1,5 @@
+// Ported from / modeled on ymfm (Aaron Giles), BSD-3-Clause. See THIRD_PARTY.
+
 /// A single FM operator: a phase accumulator feeding the log-domain sine tables.
 ///
 /// This is the smallest sound-producing unit. With no extra attenuation it emits a

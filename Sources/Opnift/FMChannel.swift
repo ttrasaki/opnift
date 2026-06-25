@@ -1,3 +1,6 @@
+// Algorithm routing, modulation and feedback ported from / modeled on ymfm
+// (Aaron Giles), BSD-3-Clause. See THIRD_PARTY.
+
 /// A 4-operator FM channel: the core of OPN voicing.
 ///
 /// Four operators (indices 0…3 = OP1…OP4) are wired together by one of 8 **algorithms**
@@ -75,9 +78,9 @@ public struct FMChannel {
 
     // MARK: Clocking
 
-    /// Advance all four envelopes by one EG clock.
-    public mutating func clockEnvelopes() {
-        for i in 0..<4 { envelopes[i].clock() }
+    /// Advance all four envelopes by one EG clock, gated by the shared EG counter.
+    public mutating func clockEnvelopes(_ egCounter: UInt32) {
+        for i in 0..<4 { envelopes[i].clock(egCounter) }
     }
 
     @inline(__always)
@@ -98,7 +101,8 @@ public struct FMChannel {
         feedback1 = feedback0
         feedback0 = o0
 
-        // OP2…OP4 routed per algorithm (modulation in 10-bit index units, depth = >> 1).
+        // OP2…OP4 routed per algorithm. Modulation = (sum of source outputs) >> 1, in
+        // 10-bit waveform-index units — matching ymfm's `opout[x] >> 1`.
         var o1: Int32 = 0, o2: Int32 = 0, o3: Int32 = 0
         switch algorithm {
         case 0: // OP1→OP2→OP3→OP4
