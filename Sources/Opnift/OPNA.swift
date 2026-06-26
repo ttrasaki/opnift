@@ -234,12 +234,11 @@ public struct OPNA {
         // SSG runs faster; advance it and point-sample the raw stream at FM rate.
         // No anti-alias low-pass: it's the dominant per-sample cost and we keep the
         // SSG output unsuppressed (some decimation aliasing is accepted as a result).
-        var raw = 0.0
         for _ in 0..<OPNA.ssgClocksPerSample {
             ssg.clock()
-            raw = Double(ssg.output())
         }
-        let ssgSample = Int32(raw * ssgVolume)
+        // Point-sample the stream once, at the FM rate, after advancing the SSG clock.
+        let ssgSample = Int32(Double(ssg.output()) * ssgVolume)
         left &+= ssgSample
         right &+= ssgSample
 
