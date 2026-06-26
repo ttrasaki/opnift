@@ -24,9 +24,6 @@ func applyEnv(_ chip: inout OPNA) {
     if let env = ProcessInfo.processInfo.environment["FM_VOLUME"], let v = Double(env) {
         chip.fmVolume = v
     }
-    if let env = ProcessInfo.processInfo.environment["SSG_CUTOFF"], let v = Double(env) {
-        chip.setSSGCutoff(v)
-    }
 }
 
 do {

@@ -1,7 +1,8 @@
 import Foundation
 
-/// A single biquad (RBJ cookbook) filter. Used for SSG anti-aliasing now and as the
-/// building block for the Phase 2 voicing EQ later.
+/// A single biquad (RBJ cookbook) filter — the building block for the Phase 2 voicing
+/// EQ. (Currently unused: the SSG anti-alias low-pass that used it was removed in favor
+/// of raw point-sampling at the FM rate.)
 public struct Biquad {
     private var b0: Double = 1, b1: Double = 0, b2: Double = 0
     private var a1: Double = 0, a2: Double = 0

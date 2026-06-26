@@ -33,10 +33,6 @@ public struct OPNA {
 
     /// SSG runs at master / 8; FM at master / 144 → 18 SSG clocks per FM sample.
     private static let ssgClocksPerSample = 18
-    // Anti-aliasing low-pass for the SSG stream (square/noise are harmonically rich, so
-    // decimating master/8 → master/144 aliases badly without a real filter). 4th order.
-    private var ssgLowpass1 = Biquad()
-    private var ssgLowpass2 = Biquad()
     // AC-couple the final output (the chip's analog output is DC-blocked).
     private var dcBlockL = DCBlocker()
     private var dcBlockR = DCBlocker()
@@ -92,18 +88,8 @@ public struct OPNA {
         panLeft = Array(repeating: true, count: 6)
         panRight = Array(repeating: true, count: 6)
 
-        // SSG anti-alias filter runs at the SSG clock rate (master / 8).
-        let ssgRate = clock / 8.0
-        setSSGCutoff(6000)
         dcBlockL.configure(cutoff: 10, sampleRate: sampleRate)
         dcBlockR.configure(cutoff: 10, sampleRate: sampleRate)
-    }
-
-    /// Reconfigure the SSG anti-alias / tone-shaping low-pass cutoff (Hz).
-    public mutating func setSSGCutoff(_ cutoff: Double) {
-        let ssgRate = clock / 8.0
-        ssgLowpass1.setLowpass(cutoff: cutoff, sampleRate: ssgRate)
-        ssgLowpass2.setLowpass(cutoff: cutoff, sampleRate: ssgRate)
     }
 
     // MARK: Register write
@@ -245,13 +231,15 @@ public struct OPNA {
             right = Int32(Double(right) * fmVolume)
         }
 
-        // SSG runs faster; low-pass the stream (anti-alias) then point-sample at FM rate.
-        var filtered = 0.0
+        // SSG runs faster; advance it and point-sample the raw stream at FM rate.
+        // No anti-alias low-pass: it's the dominant per-sample cost and we keep the
+        // SSG output unsuppressed (some decimation aliasing is accepted as a result).
+        var raw = 0.0
         for _ in 0..<OPNA.ssgClocksPerSample {
             ssg.clock()
-            filtered = ssgLowpass2.process(ssgLowpass1.process(Double(ssg.output())))
+            raw = Double(ssg.output())
         }
-        let ssgSample = Int32(filtered * ssgVolume)
+        let ssgSample = Int32(raw * ssgVolume)
         left &+= ssgSample
         right &+= ssgSample
 
