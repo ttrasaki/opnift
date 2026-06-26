@@ -67,7 +67,9 @@ public struct VGMPlayer {
 
     public init(song: VGM) {
         self.song = song
-        self.chip = OPNA(clock: Double(song.chipClock))
+        // YM2203 clock present → OPN (master/72); otherwise OPNA (master/144).
+        let kind: OPNA.Kind = song.ym2203Clock != 0 ? .opn : .opna
+        self.chip = OPNA(clock: Double(song.chipClock), kind: kind)
     }
 
     /// Render `seconds` of audio at the chip's native rate (unclamped Int32 L/R).

@@ -18,6 +18,8 @@ public struct S98 {
     public let tickNumerator: UInt32
     public let tickDenominator: UInt32
     public let opnaClock: UInt32
+    /// Chip family implied by the device table (OPN = YM2203, OPNA = YM2608 / OPN2).
+    public let chipKind: OPNA.Kind
     /// The command/dump byte stream (from the dump offset to end of file).
     public let dump: [UInt8]
     /// Loop restart point as an index into `dump`, or nil if the song doesn't loop.
@@ -49,8 +51,9 @@ public struct S98 {
 
         guard dumpOffset > 0, dumpOffset <= bytes.count else { throw ParseError.truncated }
 
-        // Resolve the OPNA clock: read the v3 device table if present, else default.
+        // Resolve the chip clock & kind: read the v3 device table if present, else default.
         var clock: UInt32 = OPNA.defaultClockHz
+        var kind: OPNA.Kind = .opna
         if deviceCount > 0 {
             for i in 0..<Int(deviceCount) {
                 let base = 0x20 + i * 16
@@ -60,11 +63,14 @@ public struct S98 {
                 // 2 = YM2203 (OPN), 3 = YM2612 (OPN2), 4 = YM2608 (OPNA).
                 if type == 2 || type == 3 || type == 4 {
                     if deviceClock != 0 { clock = deviceClock }
+                    // OPN (YM2203) = master/72; OPN2/OPNA = master/144.
+                    kind = (type == 2) ? .opn : .opna
                     break
                 }
             }
         }
         opnaClock = clock
+        chipKind = kind
 
         tickNumerator = timerInfo == 0 ? 10 : timerInfo
         tickDenominator = timerInfo2 == 0 ? 1000 : timerInfo2
@@ -82,7 +88,7 @@ public struct S98Player {
 
     public init(song: S98) {
         self.song = song
-        self.chip = OPNA(clock: Double(song.opnaClock))
+        self.chip = OPNA(clock: Double(song.opnaClock), kind: song.chipKind)
     }
 
     /// Render `seconds` of audio at the chip's native rate (unclamped Int32 L/R).

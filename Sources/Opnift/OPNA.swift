@@ -8,9 +8,10 @@
 /// stream plays. CH3 special (per-operator frequency) mode and detune are not yet
 /// modeled. These are deliberate Phase-5 omissions, not bugs.
 ///
-/// Frequency: at the OPNA native FM rate `clock / 144` (~55466 Hz), a 20-bit phase
-/// accumulator advances by `(fnum << block) >> 1` per sample (derived to match A440 ≈
-/// block 4 / fnum 0x410). Per-operator MUL scales that.
+/// Frequency: at the native FM rate `clock / fmDivider` (~55466 Hz; OPNA/YM2608 =
+/// clock/144, OPN/YM2203 = clock/72), a 20-bit phase accumulator advances by
+/// `(fnum << block) >> 1` per sample (derived to match A440 ≈ block 4 / fnum 0x410).
+/// Per-operator MUL scales that.
 public struct OPNA {
 
     /// Default OPNA master clock (Hz).
@@ -18,9 +19,17 @@ public struct OPNA {
     /// Default OPNA master clock as an integer (Hz).
     public static let defaultClockHz: UInt32 = 7_987_200
 
+    /// Which OPN-family chip this models; selects the FM clock divider.
+    public enum Kind { case opn /* YM2203 */, opna /* YM2608 */ }
+
     public let clock: Double
+    /// The modeled chip family.
+    public let kind: Kind
+    /// FM clock divider: OPN (YM2203) runs the FM engine at master/72, OPNA (YM2608) at
+    /// master/144. Both land near 55.5 kHz since OPNA's master clock is ~2× the OPN's.
+    private var fmDivider: Double { kind == .opn ? 72.0 : 144.0 }
     /// Native FM synthesis sample rate (Hz).
-    public var sampleRate: Double { clock / 144.0 }
+    public var sampleRate: Double { clock / fmDivider }
 
     public var channels: [FMChannel]
     /// The SSG (square-wave) side of the chip.
@@ -31,7 +40,8 @@ public struct OPNA {
     /// FM mix level (1 = normal). Mainly for isolating SSG vs FM during analysis.
     public var fmVolume: Double = 1.0
 
-    /// SSG runs at master / 8; FM at master / 144 → 18 SSG clocks per FM sample.
+    /// SSG/FM clock ratio is 18:1 on both chips (OPNA: master/8 ÷ master/144;
+    /// OPN: master/4 ÷ master/72), so this constant is correct regardless of kind.
     private static let ssgClocksPerSample = 18
     // AC-couple the final output (the chip's analog output is DC-blocked).
     private var dcBlockL = DCBlocker()
@@ -77,8 +87,9 @@ public struct OPNA {
         8, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 20, 22, 22, 22, 22,
     ]
 
-    public init(clock: Double = OPNA.defaultClock) {
+    public init(clock: Double = OPNA.defaultClock, kind: Kind = .opna) {
         self.clock = clock
+        self.kind = kind
         channels = (0..<6).map { _ in FMChannel() }
         blockFnumHigh = Array(repeating: 0, count: 6)
         fnum = Array(repeating: 0, count: 6)

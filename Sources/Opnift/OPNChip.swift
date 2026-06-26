@@ -22,13 +22,14 @@ public final class OPNChip {
     private var phase: Double = 0.0
 
     public init(type: OPNChipType, clock: UInt32, sampleRate: Int) {
-        self.chip = OPNA(clock: Double(clock))
+        let kind: OPNA.Kind = type == .ym2203 ? .opn : .opna
+        self.chip = OPNA(clock: Double(clock), kind: kind)
         self.outputSampleRate = Double(sampleRate)
     }
 
     /// Reset all chip state (call at the start of a new track or on seek).
     public func reset() {
-        chip = OPNA(clock: chip.clock)
+        chip = OPNA(clock: chip.clock, kind: chip.kind)
         p0L = 0; p0R = 0
         p1L = 0; p1R = 0
         p2L = 0; p2R = 0
