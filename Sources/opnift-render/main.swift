@@ -17,12 +17,12 @@ let outputPath = arguments[2]
 let seconds = arguments.count > 3 ? (Double(arguments[3]) ?? 30.0) : 30.0
 let sampleRate = arguments.count > 4 ? (Double(arguments[4]) ?? 44100.0) : 44100.0
 
-func applyEnv(_ chip: inout OPNA) {
+func applyEnv(_ player: OPNStreamPlayer) {
     if let env = ProcessInfo.processInfo.environment["SSG_VOLUME"], let v = Double(env) {
-        chip.ssgVolume = v
+        player.setSSGVolume(v)
     }
     if let env = ProcessInfo.processInfo.environment["FM_VOLUME"], let v = Double(env) {
-        chip.fmVolume = v
+        player.setFMVolume(v)
     }
 }
 
@@ -33,20 +33,20 @@ do {
 
     if ext == "vgm" {
         let song = try VGM(data: data)
-        var player = VGMPlayer(song: song)
-        applyEnv(&player.chip)
+        let player = VGMPlayer(song: song, sampleRate: sampleRate)
+        applyEnv(player)
         let chip = song.ym2203Clock != 0 ? "YM2203" : "YM2608"
         FileHandle.standardError.write(Data(
-            "VGM v\(String(format: "%X", song.version))  \(chip) \(song.chipClock) Hz  native \(String(format: "%.1f", player.chip.sampleRate)) Hz\n".utf8))
-        pcm = player.render(seconds: seconds, sampleRate: sampleRate)
+            "VGM v\(String(format: "%X", song.version))  \(chip) \(song.chipClock) Hz  out \(String(format: "%.1f", sampleRate)) Hz\n".utf8))
+        pcm = player.render(seconds: seconds)
     } else {
         let song = try S98(data: data)
-        var player = S98Player(song: song)
-        applyEnv(&player.chip)
+        let player = S98Player(song: song, sampleRate: sampleRate)
+        applyEnv(player)
         let tickMs = song.tickSeconds * 1000.0
         FileHandle.standardError.write(Data(
-            "S98 v\(song.version)  clock \(song.opnaClock) Hz  tick \(String(format: "%.3f", tickMs)) ms  native \(String(format: "%.1f", player.chip.sampleRate)) Hz\n".utf8))
-        pcm = player.render(seconds: seconds, sampleRate: sampleRate)
+            "S98 v\(song.version)  clock \(song.opnaClock) Hz  tick \(String(format: "%.3f", tickMs)) ms  out \(String(format: "%.1f", sampleRate)) Hz\n".utf8))
+        pcm = player.render(seconds: seconds)
     }
 
     let wav = WAV.data(interleaved: pcm, channels: 2, sampleRate: Int(sampleRate))

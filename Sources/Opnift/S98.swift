@@ -80,112 +80,54 @@ public struct S98 {
     }
 }
 
-/// Drives an `OPNA` from an `S98` command stream, producing audio.
-public struct S98Player {
+/// Streaming player that drives a single OPN/OPNA chip from an `S98` command stream.
+///
+/// S98 timing is in *syncs* of `tickSeconds`; that is converted to output frames and fed
+/// to the shared `OPNStreamPlayer` machinery, whose resampler carries phase across blocks.
+public final class S98Player: OPNStreamPlayer {
 
-    public var chip: OPNA
     public let song: S98
+    private let chip: ChipVoice
+    private let outputFramesPerSync: Double
 
-    public init(song: S98) {
+    public init(song: S98, sampleRate: Double = 44100) {
         self.song = song
-        self.chip = OPNA(clock: Double(song.opnaClock), kind: song.chipKind)
+        let type: OPNChipType = song.chipKind == .opn ? .ym2203 : .ym2608
+        let voice = ChipVoice(type: type, clock: song.opnaClock, sampleRate: Int(sampleRate))
+        self.chip = voice
+        self.outputFramesPerSync = song.tickSeconds * sampleRate
+        super.init(voices: [voice], outputSampleRate: sampleRate)
+        pos = 0
     }
 
-    /// Render `seconds` of audio at the chip's native rate (unclamped Int32 L/R).
-    public mutating func renderNative(seconds: Double) -> (left: [Int32], right: [Int32]) {
-        let rate = chip.sampleRate
-        let target = Int((seconds * rate).rounded())
-        let samplesPerTick = song.tickSeconds * rate
+    override func rewindToStart() { pos = 0 }
 
-        var left = [Int32]()
-        var right = [Int32]()
-        left.reserveCapacity(target)
-        right.reserveCapacity(target)
-
-        var sampleAccumulator = 0.0
-        var pos = 0
+    override func processEvent() {
         let dump = song.dump
+        guard pos < dump.count else { loopOrEnd(loopPos: song.loopIndex); return }
+        let command = dump[pos]; pos += 1
 
-        func renderTicks(_ count: Int) {
-            sampleAccumulator += Double(count) * samplesPerTick
-            var want = Int(sampleAccumulator)
-            sampleAccumulator -= Double(want)
-            while want > 0 && left.count < target {
-                let (l, r) = chip.tick()
-                left.append(l)
-                right.append(r)
-                want -= 1
+        switch command {
+        case 0xFF: // one sync
+            emitWait(outputFrames: outputFramesPerSync)
+        case 0xFE: // n+2 syncs, variable-length count
+            var n = 0
+            var shift = 0
+            while pos < dump.count {
+                let byte = dump[pos]; pos += 1
+                n |= Int(byte & 0x7F) << shift
+                shift += 7
+                if byte & 0x80 == 0 { break }
+            }
+            emitWait(outputFrames: Double(n + 2) * outputFramesPerSync)
+        case 0xFD: // end of dump
+            loopOrEnd(loopPos: (song.loopIndex.flatMap { $0 < dump.count ? $0 : nil }))
+        default: // device write: even command = port 0, odd = port 1
+            guard pos + 1 < dump.count else { pos = dump.count; ended = true; return }
+            let address = dump[pos]; let data = dump[pos + 1]; pos += 2
+            if Int(command) >> 1 == 0 { // device 0 (the OPNA)
+                chip.writeRegister(port: Int(command) & 1, address: address, data: data)
             }
         }
-
-        var endedNaturally = false
-        stream: while left.count < target {
-            guard pos < dump.count else { endedNaturally = true; break }
-            let command = dump[pos]
-            pos += 1
-            switch command {
-            case 0xFF: // one sync
-                renderTicks(1)
-            case 0xFE: // n+2 syncs, variable-length count
-                var n = 0
-                var shift = 0
-                while pos < dump.count {
-                    let byte = dump[pos]
-                    pos += 1
-                    n |= Int(byte & 0x7F) << shift
-                    shift += 7
-                    if byte & 0x80 == 0 { break }
-                }
-                renderTicks(n + 2)
-            case 0xFD: // end of dump
-                if let loop = song.loopIndex, loop < dump.count {
-                    pos = loop
-                } else {
-                    endedNaturally = true
-                    break stream
-                }
-            default: // device write: even command = port 0, odd = port 1
-                guard pos + 1 < dump.count else { pos = dump.count; break }
-                let address = dump[pos]
-                let data = dump[pos + 1]
-                pos += 2
-                if Int(command) >> 1 == 0 { // device 0 (the OPNA)
-                    chip.writeRegister(port: Int(command) & 1, address: address, data: data)
-                }
-            }
-        }
-
-        // If the song ended before `seconds`, stop near the end — render a short tail so
-        // release envelopes ring out, but don't pad the rest with silence. Looping / long
-        // songs instead simply hit `target` above.
-        if endedNaturally {
-            let tail = min(Int(2.0 * rate), target - left.count)
-            for _ in 0..<max(0, tail) {
-                let (l, r) = chip.tick()
-                left.append(l)
-                right.append(r)
-            }
-        } else {
-            while left.count < target { // reached the duration cap on a looping/long song
-                left.append(0)
-                right.append(0)
-            }
-        }
-        return (left, right)
-    }
-
-    /// Render `seconds` of audio, resampled to `sampleRate`, as interleaved 16-bit PCM.
-    public mutating func render(seconds: Double, sampleRate: Double = 44100) -> [Int16] {
-        let (nativeL, nativeR) = renderNative(seconds: seconds)
-        let outL = resampleLinear(nativeL, inputRate: chip.sampleRate, outputRate: sampleRate)
-        let outR = resampleLinear(nativeR, inputRate: chip.sampleRate, outputRate: sampleRate)
-        let n = min(outL.count, outR.count)
-        var interleaved = [Int16]()
-        interleaved.reserveCapacity(n * 2)
-        for i in 0..<n {
-            interleaved.append(clampToInt16(outL[i]))
-            interleaved.append(clampToInt16(outR[i]))
-        }
-        return interleaved
     }
 }

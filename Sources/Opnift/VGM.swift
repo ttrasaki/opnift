@@ -59,113 +59,86 @@ public struct VGM {
     }
 }
 
-/// Drives an `OPNA` from a VGM command stream, producing audio.
-public struct VGMPlayer {
+/// Streaming player that drives one or two OPN/OPNA chips from a VGM command stream.
+///
+/// VGM timing is in 44100 Hz units; that is converted to output frames and fed to the
+/// shared `OPNStreamPlayer` machinery, which carries each chip's resampler phase across
+/// blocks (no per-block seam artifacts).
+public final class VGMPlayer: OPNStreamPlayer {
 
-    public var chip: OPNA
     public let song: VGM
+    private let ym2203: ChipVoice?   // VGM cmd 0x55
+    private let ym2608: ChipVoice?   // VGM cmd 0x56 (port 0) / 0x57 (port 1)
+    private let outputFramesPerVGMSample: Double
 
-    public init(song: VGM) {
+    public init(song: VGM, sampleRate: Double = 44100) {
         self.song = song
-        // YM2203 clock present → OPN (master/72); otherwise OPNA (master/144).
-        let kind: OPNA.Kind = song.ym2203Clock != 0 ? .opn : .opna
-        self.chip = OPNA(clock: Double(song.chipClock), kind: kind)
+        let v3 = song.ym2203Clock != 0
+            ? ChipVoice(type: .ym2203, clock: song.ym2203Clock, sampleRate: Int(sampleRate)) : nil
+        let v8 = song.ym2608Clock != 0
+            ? ChipVoice(type: .ym2608, clock: song.ym2608Clock, sampleRate: Int(sampleRate)) : nil
+        self.ym2203 = v3
+        self.ym2608 = v8
+        self.outputFramesPerVGMSample = sampleRate / 44100.0
+        super.init(voices: [v3, v8].compactMap { $0 }, outputSampleRate: sampleRate)
+        pos = 0
     }
 
-    /// Render `seconds` of audio at the chip's native rate (unclamped Int32 L/R).
-    public mutating func renderNative(seconds: Double) -> (left: [Int32], right: [Int32]) {
-        let rate = chip.sampleRate
-        let target = Int((seconds * rate).rounded())
-        // VGM timing is in 44100 Hz units; convert to native chip samples.
-        let nativePerVGM = rate / 44100.0
+    override func rewindToStart() { pos = 0 }
 
-        var left = [Int32]()
-        var right = [Int32]()
-        left.reserveCapacity(target)
-        right.reserveCapacity(target)
+    /// Operand byte count for VGM commands we don't act on, so `pos` advances correctly.
+    private func operandCount(_ cmd: UInt8) -> Int {
+        switch cmd {
+        case 0x30...0x3F:        return 1
+        case 0x40...0x4E:        return 2
+        case 0x4F, 0x50:         return 1
+        case 0x51...0x5F:        return 2
+        case 0x68:               return 11   // PCM RAM write
+        case 0x90, 0x91, 0x95:   return 4    // DAC stream control
+        case 0x92:               return 5
+        case 0x93:               return 10
+        case 0x94:               return 1
+        case 0xA0...0xBF:        return 2
+        case 0xC0...0xDF:        return 3
+        case 0xE0...0xE1:        return 4
+        default:                 return 0
+        }
+    }
 
-        var accumulator = 0.0
-        var pos = 0
+    override func processEvent() {
         let dump = song.dump
+        guard pos < dump.count else { loopOrEnd(loopPos: song.loopIndex); return }
+        let cmd = dump[pos]; pos += 1
 
-        func waitVGMSamples(_ count: Int) {
-            accumulator += Double(count) * nativePerVGM
-            var want = Int(accumulator)
-            accumulator -= Double(want)
-            while want > 0 && left.count < target {
-                let (l, r) = chip.tick()
-                left.append(l)
-                right.append(r)
-                want -= 1
-            }
+        switch cmd {
+        case 0x55:  // YM2203 port 0
+            guard pos + 1 < dump.count else { ended = true; return }
+            ym2203?.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1]); pos += 2
+        case 0x56:  // YM2608 port 0
+            guard pos + 1 < dump.count else { ended = true; return }
+            ym2608?.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1]); pos += 2
+        case 0x57:  // YM2608 port 1
+            guard pos + 1 < dump.count else { ended = true; return }
+            ym2608?.writeRegister(port: 1, address: dump[pos], data: dump[pos + 1]); pos += 2
+        case 0x61:  // wait N samples (16-bit LE)
+            guard pos + 1 < dump.count else { ended = true; return }
+            let n = Int(dump[pos]) | (Int(dump[pos + 1]) << 8); pos += 2
+            emitWait(outputFrames: Double(n) * outputFramesPerVGMSample)
+        case 0x62:  emitWait(outputFrames: 735 * outputFramesPerVGMSample)  // 1/60 s
+        case 0x63:  emitWait(outputFrames: 882 * outputFramesPerVGMSample)  // 1/50 s
+        case 0x66:  loopOrEnd(loopPos: song.loopIndex)
+        case 0x70...0x7F:  // wait n+1 samples
+            emitWait(outputFrames: Double(Int(cmd & 0x0F) + 1) * outputFramesPerVGMSample)
+        case 0x80...0x8F:  // YM2612 DAC + wait n (not our chips) — honour the wait
+            emitWait(outputFrames: Double(Int(cmd & 0x0F)) * outputFramesPerVGMSample)
+        case 0x67:  // data block: 0x66, type, u32 size, data...
+            guard pos + 6 <= dump.count else { ended = true; return }
+            let size = Int(dump[pos + 2]) | Int(dump[pos + 3]) << 8
+                     | Int(dump[pos + 4]) << 16 | Int(dump[pos + 5]) << 24
+            pos += 6 + size
+        default:
+            pos += operandCount(cmd)
+            if pos > dump.count { ended = true }
         }
-
-        var endedNaturally = false
-        stream: while left.count < target {
-            guard pos < dump.count else { endedNaturally = true; break }
-            let cmd = dump[pos]
-            pos += 1
-            switch cmd {
-            case 0x55:  // YM2203 port 0
-                guard pos + 1 < dump.count else { break stream }
-                chip.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1])
-                pos += 2
-            case 0x56:  // YM2608 port 0
-                guard pos + 1 < dump.count else { break stream }
-                chip.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1])
-                pos += 2
-            case 0x57:  // YM2608 port 1
-                guard pos + 1 < dump.count else { break stream }
-                chip.writeRegister(port: 1, address: dump[pos], data: dump[pos + 1])
-                pos += 2
-            case 0x61:  // wait N samples (16-bit LE)
-                guard pos + 1 < dump.count else { break stream }
-                let n = Int(dump[pos]) | (Int(dump[pos + 1]) << 8)
-                pos += 2
-                waitVGMSamples(n)
-            case 0x62:  // wait 735 samples (1/60 sec)
-                waitVGMSamples(735)
-            case 0x63:  // wait 882 samples (1/50 sec)
-                waitVGMSamples(882)
-            case 0x66:  // end of data
-                if let loop = song.loopIndex {
-                    pos = loop
-                } else {
-                    endedNaturally = true
-                    break stream
-                }
-            case 0x70...0x7F:  // wait n+1 samples
-                waitVGMSamples(Int(cmd & 0x0F) + 1)
-            default:
-                break stream  // unknown command — stop safely
-            }
-        }
-
-        if endedNaturally {
-            let tail = min(Int(2.0 * rate), target - left.count)
-            for _ in 0..<max(0, tail) {
-                let (l, r) = chip.tick()
-                left.append(l)
-                right.append(r)
-            }
-        } else {
-            while left.count < target { left.append(0); right.append(0) }
-        }
-        return (left, right)
-    }
-
-    /// Render `seconds` of audio, resampled to `sampleRate`, as interleaved 16-bit PCM.
-    public mutating func render(seconds: Double, sampleRate: Double = 44100) -> [Int16] {
-        let (nativeL, nativeR) = renderNative(seconds: seconds)
-        let outL = resampleLinear(nativeL, inputRate: chip.sampleRate, outputRate: sampleRate)
-        let outR = resampleLinear(nativeR, inputRate: chip.sampleRate, outputRate: sampleRate)
-        let n = min(outL.count, outR.count)
-        var interleaved = [Int16]()
-        interleaved.reserveCapacity(n * 2)
-        for i in 0..<n {
-            interleaved.append(clampToInt16(outL[i]))
-            interleaved.append(clampToInt16(outR[i]))
-        }
-        return interleaved
     }
 }
