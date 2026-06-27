@@ -22,6 +22,10 @@ public class OPNStreamPlayer {
     private var pendingFrames: Int = 0   // whole output frames waiting to be rendered
     private var fracCarry: Double = 0.0   // sub-frame remainder carried between waits
 
+    /// Scratch accumulator for multi-chip mixing, reused across `renderBlock` calls so
+    /// the stereo hot path stays allocation-free. Grown on demand, never shrunk.
+    private var mixBuffer: [Int32] = []
+
     /// Output frames produced since the last reset/seek.
     public private(set) var renderedFrames: UInt64 = 0
     /// True once the log ended with no loop point (or a subclass forced a stop).
@@ -76,6 +80,13 @@ public class OPNStreamPlayer {
     /// Seek to `targetFrame` output frames from the start: replay the command stream
     /// (applying register writes so chip state is correct at the seek point) without
     /// generating audio for the skipped span. Leaves `renderedFrames == targetFrame`.
+    ///
+    /// Approximation: the skipped span replays register writes but does *not* advance
+    /// `chip.tick()`, so the chip's continuous analog state — envelope phase, LFO, SSG
+    /// noise/tone counters — does not progress across the gap. Seeking into the middle of
+    /// a sustained note therefore restarts it from the key-on attack rather than resuming
+    /// at its true decayed level. For music playback this self-corrects within a frame or
+    /// two and keeps seeks O(commands) instead of O(samples); it is not sample-accurate.
     public func seek(toFrame targetFrame: UInt64) {
         reset()
         while renderedFrames < targetFrame && !ended {
@@ -119,9 +130,13 @@ public class OPNStreamPlayer {
             voices[0].render(frames: count, into: &buffer, offset: offset)
             return
         }
-        var mix = [Int32](repeating: 0, count: count * 2)
-        for voice in voices { voice.renderAdditive(frames: count, into: &mix, offset: 0) }
-        for i in 0..<(count * 2) { buffer[offset * 2 + i] = clampToInt16(mix[i]) }
+        let samples = count * 2
+        if mixBuffer.count < samples {
+            mixBuffer.append(contentsOf: repeatElement(0, count: samples - mixBuffer.count))
+        }
+        for i in 0..<samples { mixBuffer[i] = 0 }
+        for voice in voices { voice.renderAdditive(frames: count, into: &mixBuffer, offset: 0) }
+        for i in 0..<samples { buffer[offset * 2 + i] = clampToInt16(mixBuffer[i]) }
     }
 
     // MARK: - Offline convenience (CLI / golden compare)
