@@ -19,7 +19,7 @@ public struct S98 {
     public let tickDenominator: UInt32
     public let opnaClock: UInt32
     /// Chip family implied by the device table (OPN = YM2203, OPNA = YM2608 / OPN2).
-    public let chipKind: OPNA.Kind
+    public let chipKind: ChipKind
     /// The command/dump byte stream (from the dump offset to end of file).
     public let dump: [UInt8]
     /// Loop restart point as an index into `dump`, or nil if the song doesn't loop.
@@ -53,7 +53,7 @@ public struct S98 {
 
         // Resolve the chip clock & kind: read the v3 device table if present, else default.
         var clock: UInt32 = OPNA.defaultClockHz
-        var kind: OPNA.Kind = .opna
+        var kind: ChipKind = .opna
         if deviceCount > 0 {
             for i in 0..<Int(deviceCount) {
                 let base = 0x20 + i * 16
@@ -92,8 +92,7 @@ public final class S98Player: OPNStreamPlayer {
 
     public init(song: S98, sampleRate: Double = 44100) {
         self.song = song
-        let type: OPNChipType = song.chipKind == .opn ? .ym2203 : .ym2608
-        let voice = ChipVoice(type: type, clock: song.opnaClock, sampleRate: Int(sampleRate))
+        let voice = ChipVoice(kind: song.chipKind, clock: song.opnaClock, sampleRate: Int(sampleRate))
         self.chip = voice
         self.outputFramesPerSync = song.tickSeconds * sampleRate
         super.init(voices: [voice], outputSampleRate: sampleRate)

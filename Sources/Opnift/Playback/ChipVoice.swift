@@ -1,9 +1,3 @@
-/// Chip variant selector for ChipVoice.
-public enum OPNChipType {
-    case ym2203  // OPN  – 3 FM ch + SSG
-    case ym2608  // OPNA – 6 FM ch + SSG
-}
-
 /// A single OPN/OPNA chip plus its streaming resampler, rendering at the output rate.
 ///
 /// Write registers from your decoder/player, then pull interleaved stereo Int16 PCM
@@ -18,8 +12,7 @@ public final class ChipVoice {
     private var resampler: Resampler
     private let outputSampleRate: Double
 
-    public init(type: OPNChipType, clock: UInt32, sampleRate: Int) {
-        let kind: OPNA.Kind = type == .ym2203 ? .opn : .opna
+    public init(kind: ChipKind, clock: UInt32, sampleRate: Int) {
         self.chip = OPNA(clock: Double(clock), kind: kind)
         self.outputSampleRate = Double(sampleRate)
         self.resampler = Resampler(inputRate: chip.sampleRate, outputRate: Double(sampleRate))

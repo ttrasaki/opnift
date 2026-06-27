@@ -2,11 +2,11 @@ import Foundation
 
 /// Streaming stereo Catmull-Rom resampler from a native input rate to an output rate.
 ///
-/// This is the single source of truth for rate conversion in Opnift. It keeps the
-/// fractional phase and a 4-point sliding window across calls, so feeding it in
-/// arbitrary-sized chunks produces exactly the same result as one continuous pass —
-/// no per-block phase reset, edge clamping, or dropped samples (the artifacts that
-/// the old batch `resampleLinear`-per-block usage produced as constant crackle).
+/// This is the only resampler in Opnift. It keeps the fractional phase and a 4-point
+/// sliding window across calls, so feeding it in arbitrary-sized chunks produces exactly
+/// the same result as one continuous pass — no per-block phase reset, edge clamping, or
+/// dropped samples (the artifacts that the old batch resampler-per-block usage produced
+/// as constant crackle).
 ///
 /// Native frames are pulled on demand through a caller-supplied closure, so the
 /// resampler never needs the whole input buffered; it asks for the next native

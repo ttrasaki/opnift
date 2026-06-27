@@ -74,9 +74,9 @@ public final class VGMPlayer: OPNStreamPlayer {
     public init(song: VGM, sampleRate: Double = 44100) {
         self.song = song
         let v3 = song.ym2203Clock != 0
-            ? ChipVoice(type: .ym2203, clock: song.ym2203Clock, sampleRate: Int(sampleRate)) : nil
+            ? ChipVoice(kind: .opn, clock: song.ym2203Clock, sampleRate: Int(sampleRate)) : nil
         let v8 = song.ym2608Clock != 0
-            ? ChipVoice(type: .ym2608, clock: song.ym2608Clock, sampleRate: Int(sampleRate)) : nil
+            ? ChipVoice(kind: .opna, clock: song.ym2608Clock, sampleRate: Int(sampleRate)) : nil
         self.ym2203 = v3
         self.ym2608 = v8
         self.outputFramesPerVGMSample = sampleRate / 44100.0

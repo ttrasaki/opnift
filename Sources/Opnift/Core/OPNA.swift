@@ -12,6 +12,10 @@
 /// clock/144, OPN/YM2203 = clock/72), a 20-bit phase accumulator advances by
 /// `(fnum << block) >> 1` per sample (derived to match A440 ≈ block 4 / fnum 0x410).
 /// Per-operator MUL scales that.
+/// Which OPN-family chip is being emulated. The single chip-selector type across the
+/// library: parsers, `ChipVoice`, and `OPNA` all speak `ChipKind`.
+public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */ }
+
 public struct OPNA {
 
     /// Default OPNA master clock (Hz).
@@ -19,12 +23,9 @@ public struct OPNA {
     /// Default OPNA master clock as an integer (Hz).
     public static let defaultClockHz: UInt32 = 7_987_200
 
-    /// Which OPN-family chip this models; selects the FM clock divider.
-    public enum Kind { case opn /* YM2203 */, opna /* YM2608 */ }
-
     public let clock: Double
     /// The modeled chip family.
-    public let kind: Kind
+    public let kind: ChipKind
     /// FM clock divider: OPN (YM2203) runs the FM engine at master/72, OPNA (YM2608) at
     /// master/144. Both land near 55.5 kHz since OPNA's master clock is ~2× the OPN's.
     private var fmDivider: Double { kind == .opn ? 72.0 : 144.0 }
@@ -87,7 +88,7 @@ public struct OPNA {
         8, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 20, 22, 22, 22, 22,
     ]
 
-    public init(clock: Double = OPNA.defaultClock, kind: Kind = .opna) {
+    public init(clock: Double = OPNA.defaultClock, kind: ChipKind = .opna) {
         self.clock = clock
         self.kind = kind
         channels = (0..<6).map { _ in FMChannel() }

@@ -65,12 +65,12 @@ struct ResamplerTests {
 
         let frames = 800
 
-        let whole = ChipVoice(type: .ym2608, clock: OPNA.defaultClockHz, sampleRate: 44100)
+        let whole = ChipVoice(kind: .opna, clock: OPNA.defaultClockHz, sampleRate: 44100)
         keyAVoice(whole)
         var bufWhole = [Int16](repeating: 0, count: frames * 2)
         whole.render(frames: frames, into: &bufWhole, offset: 0)
 
-        let split = ChipVoice(type: .ym2608, clock: OPNA.defaultClockHz, sampleRate: 44100)
+        let split = ChipVoice(kind: .opna, clock: OPNA.defaultClockHz, sampleRate: 44100)
         keyAVoice(split)
         var bufSplit = [Int16](repeating: 0, count: frames * 2)
         var off = 0
