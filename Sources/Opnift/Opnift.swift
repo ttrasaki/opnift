@@ -4,5 +4,5 @@
 /// design notes for the phase plan; this is Phase 1, starting from the operator tables.
 public enum Opnift {
     /// Library version. Bump alongside SemVer git tags once published.
-    public static let version = "0.2.0"
+    public static let version = "0.2.1"
 }
