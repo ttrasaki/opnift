@@ -24,9 +24,11 @@ public struct S98 {
     public let version: Int
     public let tickNumerator: UInt32
     public let tickDenominator: UInt32
-    /// Devices to instantiate, one per `command >> 1` index in the dump. Always non-empty:
-    /// v1/v2 files (no device table) imply a single OPNA at the standard clock.
-    public let devices: [Device]
+    /// Devices in device-table order, indexed by `command >> 1` in the dump. `nil` marks a
+    /// chip family we don't emulate — kept (rather than dropped) so the indices of the
+    /// devices we *do* play stay aligned with the command stream. Always non-empty: v1/v2
+    /// files (no device table) imply a single OPNA at the standard clock.
+    public let devices: [Device?]
     /// The command/dump byte stream (from the dump offset to end of file).
     public let dump: [UInt8]
     /// Loop restart point as an index into `dump`, or nil if the song doesn't loop.
@@ -60,20 +62,24 @@ public struct S98 {
 
         // Resolve the device list: read the v3 device table if present, else assume the
         // common single-OPNA case (v1/v2 carry no table). Each S98 device type maps to the
-        // OPN-family chip whose SSG/FM clock domain matches; unknown types are skipped.
-        var devices: [Device] = []
+        // OPN-family chip whose SSG/FM clock domain matches; unsupported families become
+        // `nil` (kept in place to preserve command-stream device indices).
+        var devices: [Device?] = []
         if deviceCount > 0 {
             for i in 0..<Int(deviceCount) {
                 let base = 0x20 + i * 16
                 guard base + 8 <= bytes.count else { break }
                 let type = u32(base)
                 let deviceClock = u32(base + 4)
-                guard let kind = S98.chipKind(forDeviceType: type) else { continue }
-                let clock = deviceClock != 0 ? deviceClock : OPNA.defaultClockHz
-                devices.append(Device(kind: kind, clock: clock))
+                if let kind = S98.chipKind(forDeviceType: type) {
+                    let clock = deviceClock != 0 ? deviceClock : OPNA.defaultClockHz
+                    devices.append(Device(kind: kind, clock: clock))
+                } else {
+                    devices.append(nil)
+                }
             }
         }
-        if devices.isEmpty {
+        if devices.compactMap({ $0 }).isEmpty {
             devices = [Device(kind: .opna, clock: OPNA.defaultClockHz)]
         }
         self.devices = devices
@@ -113,8 +119,12 @@ public final class S98Player: OPNStreamPlayer {
 
     public init(song: S98, sampleRate: Double = 44100) {
         self.song = song
-        let voices = song.devices.map {
-            ChipVoice(kind: $0.kind, clock: $0.clock, sampleRate: Int(sampleRate))
+        // One voice per device slot, index-aligned with the command stream. Unsupported
+        // slots (`nil`) get a silent placeholder so later devices keep their index; no
+        // writes are routed to them, so they render silence.
+        let voices = song.devices.map { device -> ChipVoice in
+            let device = device ?? S98.Device(kind: .opna, clock: OPNA.defaultClockHz)
+            return ChipVoice(kind: device.kind, clock: device.clock, sampleRate: Int(sampleRate))
         }
         self.outputFramesPerSync = song.tickSeconds * sampleRate
         super.init(voices: voices, outputSampleRate: sampleRate)
@@ -147,7 +157,8 @@ public final class S98Player: OPNStreamPlayer {
             guard pos + 1 < dump.count else { pos = dump.count; ended = true; return }
             let address = dump[pos]; let data = dump[pos + 1]; pos += 2
             let device = Int(command) >> 1
-            if device < voices.count {
+            // Drop writes to out-of-range or unsupported (nil) device slots.
+            if device < voices.count, device < song.devices.count, song.devices[device] != nil {
                 voices[device].writeRegister(port: Int(command) & 1, address: address, data: data)
             }
         }
