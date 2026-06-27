@@ -35,10 +35,6 @@ public struct VGM {
 
         version = u32(0x08)
         totalSamples = u32(0x18)
-        ym2203Clock = bytes.count > 0x47 ? u32(0x44) : 0
-        ym2608Clock = bytes.count > 0x4B ? u32(0x48) : 0
-
-        guard ym2203Clock != 0 || ym2608Clock != 0 else { throw ParseError.noSupportedChip }
 
         // Data offset field at 0x34 is relative to 0x34; falls back to 0x40 for old files.
         let dataRelOffset = u32(0x34)
@@ -47,6 +43,18 @@ public struct VGM {
             : 0x40
 
         guard dataOffset <= bytes.count else { throw ParseError.truncated }
+
+        // The YM2203 (0x44) and YM2608 (0x48) clock fields were added in VGM v1.51.
+        // In older files those offsets are undefined header bytes — and since old data
+        // starts at 0x40, they can be live command-stream data. Only trust them when the
+        // version declares them and the field lies entirely within the header (before the
+        // data stream). The upper two bits are dual-chip / clock-divider flags, not clock.
+        let clockMask: UInt32 = 0x3FFF_FFFF
+        let hasV151Clocks = version >= 0x151
+        ym2203Clock = (hasV151Clocks && 0x44 + 4 <= dataOffset) ? u32(0x44) & clockMask : 0
+        ym2608Clock = (hasV151Clocks && 0x48 + 4 <= dataOffset) ? u32(0x48) & clockMask : 0
+
+        guard ym2203Clock != 0 || ym2608Clock != 0 else { throw ParseError.noSupportedChip }
         dump = Array(bytes[dataOffset...])
 
         let loopOff = u32(0x1C)
