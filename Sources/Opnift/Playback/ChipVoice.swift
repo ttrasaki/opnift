@@ -20,7 +20,11 @@ public final class ChipVoice {
 
     /// Reset all chip and resampler state (call at the start of a new track or on seek).
     public func reset() {
+        let ssg = chip.ssgVolume
+        let fm = chip.fmVolume
         chip = OPNA(clock: chip.clock, kind: chip.kind)
+        chip.ssgVolume = ssg
+        chip.fmVolume = fm
         resampler.reset()
     }
 

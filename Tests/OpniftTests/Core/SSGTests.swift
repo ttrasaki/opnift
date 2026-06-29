@@ -22,7 +22,8 @@ struct SSGTests {
         var values = Set<Int32>()
         var transitions = 0
         var previous = ssg.output()
-        for _ in 0..<200 {
+        // 800 clocks ≈ 200 effective steps after the SSG's ÷4 tone prescaler.
+        for _ in 0..<800 {
             ssg.clock()
             let v = ssg.output()
             values.insert(v)
