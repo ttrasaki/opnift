@@ -2,7 +2,8 @@ import Foundation
 
 /// A parsed VGM file (Video Game Music log).
 ///
-/// Supports YM2203 (OPN) and YM2608 (OPNA) chips. Timing is in 44100 Hz samples.
+/// Supports YM2203 (OPN), YM2608 (OPNA) and YM2151 (OPM) chips. Timing is in 44100 Hz
+/// samples. The YM2151 path is what plays X68000 VGMs (FM via OPM cmd 0x54).
 public struct VGM {
 
     public enum ParseError: Error { case badMagic, truncated, noSupportedChip }
@@ -10,12 +11,16 @@ public struct VGM {
     public let version: UInt32
     public let ym2203Clock: UInt32
     public let ym2608Clock: UInt32
+    public let ym2151Clock: UInt32
     public let totalSamples: UInt32
     public let dump: [UInt8]
     public let loopIndex: Int?
 
     public var chipClock: UInt32 {
-        ym2203Clock != 0 ? ym2203Clock : ym2608Clock != 0 ? ym2608Clock : OPNA.defaultClockHz
+        ym2203Clock != 0 ? ym2203Clock
+            : ym2608Clock != 0 ? ym2608Clock
+            : ym2151Clock != 0 ? ym2151Clock
+            : OPNA.defaultClockHz
     }
 
     public init(data: Data) throws {
@@ -53,8 +58,14 @@ public struct VGM {
         let hasV151Clocks = version >= 0x151
         ym2203Clock = (hasV151Clocks && 0x44 + 4 <= dataOffset) ? u32(0x44) & clockMask : 0
         ym2608Clock = (hasV151Clocks && 0x48 + 4 <= dataOffset) ? u32(0x48) & clockMask : 0
+        // The YM2151 clock field at 0x30 dates to VGM v1.10 (well before the OPN fields), so
+        // it's trustworthy on far more files; only require it to lie within the header.
+        let hasV110Clocks = version >= 0x110
+        ym2151Clock = (hasV110Clocks && 0x30 + 4 <= dataOffset) ? u32(0x30) & clockMask : 0
 
-        guard ym2203Clock != 0 || ym2608Clock != 0 else { throw ParseError.noSupportedChip }
+        guard ym2203Clock != 0 || ym2608Clock != 0 || ym2151Clock != 0 else {
+            throw ParseError.noSupportedChip
+        }
         dump = Array(bytes[dataOffset...])
 
         let loopOff = u32(0x1C)
@@ -77,6 +88,7 @@ public final class VGMPlayer: OPNStreamPlayer {
     public let song: VGM
     private let ym2203: ChipVoice?   // VGM cmd 0x55
     private let ym2608: ChipVoice?   // VGM cmd 0x56 (port 0) / 0x57 (port 1)
+    private let ym2151: ChipVoice?   // VGM cmd 0x54 (OPM, single port)
     private let outputFramesPerVGMSample: Double
 
     public init(song: VGM, sampleRate: Double = 44100) {
@@ -85,10 +97,13 @@ public final class VGMPlayer: OPNStreamPlayer {
             ? ChipVoice(kind: .opn, clock: song.ym2203Clock, sampleRate: Int(sampleRate)) : nil
         let v8 = song.ym2608Clock != 0
             ? ChipVoice(kind: .opna, clock: song.ym2608Clock, sampleRate: Int(sampleRate)) : nil
+        let vM = song.ym2151Clock != 0
+            ? ChipVoice(kind: .opm, clock: song.ym2151Clock, sampleRate: Int(sampleRate)) : nil
         self.ym2203 = v3
         self.ym2608 = v8
+        self.ym2151 = vM
         self.outputFramesPerVGMSample = sampleRate / 44100.0
-        super.init(voices: [v3, v8].compactMap { $0 }, outputSampleRate: sampleRate)
+        super.init(voices: [v3, v8, vM].compactMap { $0 }, outputSampleRate: sampleRate)
         pos = 0
     }
 
@@ -119,6 +134,9 @@ public final class VGMPlayer: OPNStreamPlayer {
         let cmd = dump[pos]; pos += 1
 
         switch cmd {
+        case 0x54:  // YM2151 (OPM, single port)
+            guard pos + 1 < dump.count else { ended = true; return }
+            ym2151?.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1]); pos += 2
         case 0x55:  // YM2203 port 0
             guard pos + 1 < dump.count else { ended = true; return }
             ym2203?.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1]); pos += 2

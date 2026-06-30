@@ -14,9 +14,24 @@
 /// Per-operator MUL scales that.
 /// Which OPN-family chip is being emulated. The single chip-selector type across the
 /// library: parsers, `ChipVoice`, and `OPNA` all speak `ChipKind`.
-public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */ }
+public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */, opm /* YM2151 */ }
 
-public struct OPNA {
+/// Shared chip interface so `ChipVoice` can hold either an OPN-family (`OPNA`) or an OPM
+/// (`OPM`) core behind one slot. Mutation goes through the existential in place, so the
+/// per-sample `tick()` does not trip array copy-on-write (verified by keeping `chip` a
+/// `var` stored property and never copying it out).
+public protocol FMCore {
+    /// Native FM synthesis sample rate (Hz).
+    var sampleRate: Double { get }
+    /// SSG → FM mix level (OPM has no SSG; its implementation is a no-op).
+    var ssgVolume: Double { get set }
+    /// FM mix level (1 = normal).
+    var fmVolume: Double { get set }
+    mutating func writeRegister(port: Int, address: UInt8, data: UInt8)
+    mutating func tick() -> (left: Int32, right: Int32)
+}
+
+public struct OPNA: FMCore {
 
     /// Default OPNA master clock (Hz).
     public static let defaultClock: Double = 7_987_200
