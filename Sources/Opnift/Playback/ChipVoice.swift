@@ -8,21 +8,33 @@
 /// Thread safety is the caller's responsibility.
 public final class ChipVoice {
 
-    private var chip: OPNA
+    private var chip: any FMCore
+    private let kind: ChipKind
+    private let clock: UInt32
     private var resampler: Resampler
     private let outputSampleRate: Double
 
     public init(kind: ChipKind, clock: UInt32, sampleRate: Int) {
-        self.chip = OPNA(clock: Double(clock), kind: kind)
+        self.kind = kind
+        self.clock = clock
+        self.chip = ChipVoice.makeChip(kind: kind, clock: clock)
         self.outputSampleRate = Double(sampleRate)
         self.resampler = Resampler(inputRate: chip.sampleRate, outputRate: Double(sampleRate))
+    }
+
+    /// Build the concrete chip core for a kind: YM2151 → `OPM`, otherwise the OPN-family `OPNA`.
+    private static func makeChip(kind: ChipKind, clock: UInt32) -> any FMCore {
+        switch kind {
+        case .opm:         return OPM(clock: Double(clock))
+        case .opn, .opna:  return OPNA(clock: Double(clock), kind: kind)
+        }
     }
 
     /// Reset all chip and resampler state (call at the start of a new track or on seek).
     public func reset() {
         let ssg = chip.ssgVolume
         let fm = chip.fmVolume
-        chip = OPNA(clock: chip.clock, kind: chip.kind)
+        chip = ChipVoice.makeChip(kind: kind, clock: clock)
         chip.ssgVolume = ssg
         chip.fmVolume = fm
         resampler.reset()
