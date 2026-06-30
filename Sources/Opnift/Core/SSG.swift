@@ -31,6 +31,12 @@ public struct SSG {
     private var toneState: [UInt32] = [0, 0, 0]   // square-wave phase (0/1)
     private var noiseCount: UInt32 = 0
     private var noiseState: UInt32 = 1            // 17-bit LFSR
+    // SSG tone/noise/envelope divider. On the YM2608 the SSG section is clocked at
+    // master/4 and the tone generator divides by 16 before TP, giving f = master/(64·TP).
+    // We advance `clock()` at master/8 (18× per FM sample), so a further ÷4 here lands the
+    // tone/noise/envelope on the correct rate (verified against fmgen: TP=256 → 487.8 Hz,
+    // not the octave-doubled 1950 Hz we produced before).
+    private var prescaler: UInt32 = 0
 
     // Envelope generator (regs 0x0B–0x0D), MAME ay8910 shape machine. `envStep` is a
     // signed down-counter from 31; `envAttack` (0x00 or 0x1F) XORs it to pick the ramp
@@ -102,8 +108,12 @@ public struct SSG {
         envVolume = envStep ^ envAttack
     }
 
-    /// Advance one SSG clock (runs at master / 8).
+    /// Advance one SSG clock (runs at master / 8). A ÷4 prescaler brings the tone/noise/
+    /// envelope generators to the YM2608's master/32 update rate.
     public mutating func clock() {
+        prescaler &+= 1
+        if prescaler < 4 { return }
+        prescaler = 0
         for ch in 0..<3 {
             toneCount[ch] += 1
             if toneCount[ch] >= tonePeriod[ch] {

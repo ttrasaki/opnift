@@ -243,14 +243,20 @@ public struct OPNA {
             right = Int32(Double(right) * fmVolume)
         }
 
-        // SSG runs faster; advance it and point-sample the raw stream at FM rate.
-        // No anti-alias low-pass: it's the dominant per-sample cost and we keep the
-        // SSG output unsuppressed (some decimation aliasing is accepted as a result).
+        // SSG runs at 18× the FM rate. Average its output over those sub-clocks (a
+        // boxcar decimation filter) rather than point-sampling once: point-sampling the
+        // clock/144 native rate folds the SSG square-wave harmonics into the audible
+        // band. That's tolerable on OPNA-clock files (native ~55.5 kHz, Nyquist 27.7 kHz)
+        // but on low-clock YM2149 files (native ~27.7 kHz, Nyquist 13.9 kHz) the folded
+        // harmonics land mid-band as an audible metallic ring (e.g. a +25 dB spur near
+        // 6.9 kHz vs the fmgen golden). The boxcar nulls the harmonics at multiples of
+        // the sub-clock rate and cheaply band-limits before we sample at the FM rate.
+        var ssgAccum: Int32 = 0
         for _ in 0..<OPNA.ssgClocksPerSample {
             ssg.clock()
+            ssgAccum &+= ssg.output()
         }
-        // Point-sample the stream once, at the FM rate, after advancing the SSG clock.
-        let ssgSample = Int32(Double(ssg.output()) * ssgVolume)
+        let ssgSample = Int32(Double(ssgAccum) / Double(OPNA.ssgClocksPerSample) * ssgVolume)
         left &+= ssgSample
         right &+= ssgSample
 
