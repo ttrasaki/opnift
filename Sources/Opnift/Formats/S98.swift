@@ -33,6 +33,20 @@ public struct S98 {
     public let dump: [UInt8]
     /// Loop restart point as an index into `dump`, or nil if the song doesn't loop.
     public let loopIndex: Int?
+    /// Metadata from the header's TAG area, keyed by lowercased tag name
+    /// (`title`, `artist`, `game`, `year`, `genre`, `comment`, `copyright`,
+    /// `s98by`, `system`). v3 files carry a `[S98]` key=value block (UTF-8 with BOM,
+    /// Shift-JIS without); v1/v2 files carry only a NUL-terminated title string,
+    /// surfaced as `title` — except the conventional `[game] title` form, which is
+    /// split into `game` and `title`. Empty if the file has no TAG area.
+    public let tags: [String: String]
+
+    /// Convenience accessors for the common TAG fields.
+    public var title: String? { tags["title"] }
+    public var game: String? { tags["game"] }
+    public var artist: String? { tags["artist"] }
+    public var copyright: String? { tags["copyright"] }
+    public var system: String? { tags["system"] }
 
     /// Seconds per sync.
     public var tickSeconds: Double { Double(tickNumerator) / Double(tickDenominator) }
@@ -54,9 +68,12 @@ public struct S98 {
         version = Int(bytes[3]) - 0x30
         let timerInfo = u32(0x04)
         let timerInfo2 = u32(0x08)
+        let tagOffset = Int(u32(0x10))
         let dumpOffset = Int(u32(0x14))
         let loopOffset = Int(u32(0x18))
         let deviceCount = u32(0x1C)
+
+        tags = S98.parseTags(bytes: bytes, tagOffset: tagOffset)
 
         guard dumpOffset > 0, dumpOffset <= bytes.count else { throw ParseError.truncated }
 
@@ -89,6 +106,69 @@ public struct S98 {
 
         dump = Array(bytes[dumpOffset...])
         loopIndex = (loopOffset != 0 && loopOffset >= dumpOffset) ? loopOffset - dumpOffset : nil
+    }
+
+    /// Parse the header's TAG area (offset field at 0x10). A v3 TAG block starts with the
+    /// `[S98]` magic followed by 0x0A-separated `key=value` lines — UTF-8 when a BOM
+    /// follows the magic, Shift-JIS otherwise. Anything else (v1/v2) is a NUL-terminated
+    /// title string. Returns an empty dictionary when there is no TAG area or it is
+    /// unreadable; tag problems never fail the parse.
+    static func parseTags(bytes: [UInt8], tagOffset: Int) -> [String: String] {
+        guard tagOffset > 0, tagOffset < bytes.count else { return [:] }
+
+        var region = Array(bytes[tagOffset...])
+        if let nul = region.firstIndex(of: 0x00) {
+            region = Array(region[..<nul])
+        }
+
+        let magic: [UInt8] = [0x5B, 0x53, 0x39, 0x38, 0x5D] // "[S98]"
+        guard region.count >= magic.count, Array(region[..<magic.count]) == magic else {
+            let title = decodeTagText(Array(region))
+            return title.isEmpty ? [:] : v1Tags(title: title)
+        }
+        var body = Array(region[magic.count...])
+
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        let isUTF8 = body.count >= bom.count && Array(body[..<bom.count]) == bom
+        if isUTF8 { body = Array(body[bom.count...]) }
+
+        var tags: [String: String] = [:]
+        for line in decodeTagText(body, preferUTF8: isUTF8)
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty, !value.isEmpty else { continue }
+            tags[key] = value
+        }
+        return tags
+    }
+
+    /// Split a v1/v2 title of the form `[game] title` into separate `game` and `title`
+    /// tags. The v1 spec defines only a single title string, so rippers conventionally
+    /// packed the game name into a leading bracketed prefix. Titles that don't match
+    /// (no leading bracket, unclosed/empty bracket, or nothing after it) are kept whole.
+    static func v1Tags(title: String) -> [String: String] {
+        guard title.hasPrefix("["), let close = title.firstIndex(of: "]") else {
+            return ["title": title]
+        }
+        let game = title[title.index(after: title.startIndex)..<close]
+            .trimmingCharacters(in: .whitespaces)
+        let rest = title[title.index(after: close)...]
+            .trimmingCharacters(in: .whitespaces)
+        guard !game.isEmpty, !rest.isEmpty else { return ["title": title] }
+        return ["title": rest, "game": game]
+    }
+
+    private static func decodeTagText(_ bytes: [UInt8], preferUTF8: Bool = false) -> String {
+        let data = Data(bytes)
+        let encodings: [String.Encoding] = preferUTF8 ? [.utf8, .shiftJIS] : [.shiftJIS, .utf8]
+        for encoding in encodings {
+            if let s = String(data: data, encoding: encoding) {
+                return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return ""
     }
 
     /// Map an S98 v3 device type to the OPN-family `ChipKind` whose clock domain matches,
