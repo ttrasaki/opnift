@@ -80,3 +80,8 @@ The FM and SSG cores are a Swift port of, and closely follow, **[ymfm](https://g
 by Aaron Giles (BSD 3-Clause), and are therefore a derivative work of ymfm. A couple
 of lookup tables originate from MAME (via ymfm). ymfm's copyright notice and the full
 list of ported parts are in [THIRD_PARTY](THIRD_PARTY).
+
+## Status
+
+Opnift is actively used in RetroTune, a retro game music player for iPhone and iPad.
+
