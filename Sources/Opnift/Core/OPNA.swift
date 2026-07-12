@@ -14,7 +14,7 @@
 /// Per-operator MUL scales that.
 /// Which OPN-family chip is being emulated. The single chip-selector type across the
 /// library: parsers, `ChipVoice`, and `OPNA` all speak `ChipKind`.
-public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */, opm /* YM2151 */ }
+public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */, opn2 /* YM2612 */, opm /* YM2151 */ }
 
 /// Shared chip interface so `ChipVoice` can hold either an OPN-family (`OPNA`) or an OPM
 /// (`OPM`) core behind one slot. Mutation goes through the existential in place, so the
@@ -41,9 +41,12 @@ public struct OPNA: FMCore {
     public let clock: Double
     /// The modeled chip family.
     public let kind: ChipKind
-    /// FM clock divider: OPN (YM2203) runs the FM engine at master/72, OPNA (YM2608) at
-    /// master/144. Both land near 55.5 kHz since OPNA's master clock is ~2× the OPN's.
+    /// FM clock divider: OPN (YM2203) runs the FM engine at master/72; OPNA (YM2608) and
+    /// OPN2 (YM2612) at master/144. All land near 55.5 kHz (OPN2 ≈ 53.3 kHz) since
+    /// OPNA/OPN2 master clocks are ~2× the OPN's.
     private var fmDivider: Double { kind == .opn ? 72.0 : 144.0 }
+    /// Whether the modeled chip has an SSG section (the OPN2/YM2612 dropped it).
+    private var hasSSG: Bool { kind != .opn2 }
     /// Native FM synthesis sample rate (Hz).
     public var sampleRate: Double { clock / fmDivider }
 
@@ -78,6 +81,13 @@ public struct OPNA: FMCore {
     // EG runs at fs/3 on real OPN.
     private var egDivider: Int = 0
     private var egCounter: UInt32 = 0
+
+    // OPN2 (YM2612) DAC: when enabled (reg 0x2B bit 7), channel 6's FM output is
+    // replaced by the last sample written to reg 0x2A. The 8-bit unsigned sample is
+    // mapped to the FM channels' ~13-bit signed range ((d − 0x80) << 6 → ±8128,
+    // matching the operators' ±8168 full scale).
+    private var dacEnabled = false
+    private var dacSample: Int32 = 0
 
     /// Register address offset → logical operator. Yamaha addresses operators in the
     /// slot order S1, S3, S2, S4.
@@ -128,10 +138,16 @@ public struct OPNA: FMCore {
             keyOnOff(data)
             return
         }
-        // SSG registers (port 0, 0x00–0x0F).
+        // SSG registers (port 0, 0x00–0x0F). The OPN2 has no SSG; on it these addresses
+        // are unmapped, so drop the write rather than exciting a phantom SSG.
         if port == 0 && address < 0x10 {
-            ssg.writeRegister(address, data)
+            if hasSSG { ssg.writeRegister(address, data) }
             return
+        }
+        // OPN2 DAC (port 0): 0x2A latches a sample, 0x2B bit 7 swaps it in for ch6 FM.
+        if kind == .opn2 && port == 0 {
+            if address == 0x2A { dacSample = (Int32(data) - 0x80) << 6; return }
+            if address == 0x2B { dacEnabled = (data & 0x80) != 0; return }
         }
         // Timer / LFO / prescaler / ADPCM live below 0x30 — decoded but ignored.
         if address < 0x30 { return }
@@ -249,7 +265,8 @@ public struct OPNA: FMCore {
         var left: Int32 = 0
         var right: Int32 = 0
         for ch in 0..<6 {
-            let sample = channels[ch].next()
+            // OPN2 DAC replaces channel 6's FM output while enabled.
+            let sample = (ch == 5 && dacEnabled) ? dacSample : channels[ch].next()
             if panLeft[ch] { left &+= sample }
             if panRight[ch] { right &+= sample }
         }
@@ -266,14 +283,16 @@ public struct OPNA: FMCore {
         // harmonics land mid-band as an audible metallic ring (e.g. a +25 dB spur near
         // 6.9 kHz vs the fmgen golden). The boxcar nulls the harmonics at multiples of
         // the sub-clock rate and cheaply band-limits before we sample at the FM rate.
-        var ssgAccum: Int32 = 0
-        for _ in 0..<OPNA.ssgClocksPerSample {
-            ssg.clock()
-            ssgAccum &+= ssg.output()
+        if hasSSG {
+            var ssgAccum: Int32 = 0
+            for _ in 0..<OPNA.ssgClocksPerSample {
+                ssg.clock()
+                ssgAccum &+= ssg.output()
+            }
+            let ssgSample = Int32(Double(ssgAccum) / Double(OPNA.ssgClocksPerSample) * ssgVolume)
+            left &+= ssgSample
+            right &+= ssgSample
         }
-        let ssgSample = Int32(Double(ssgAccum) / Double(OPNA.ssgClocksPerSample) * ssgVolume)
-        left &+= ssgSample
-        right &+= ssgSample
 
         // AC-couple (remove the SSG's DC offset / envelope shadow), like the real output.
         left = Int32(dcBlockL.process(Double(left)))

@@ -25,8 +25,8 @@ public final class ChipVoice {
     /// Build the concrete chip core for a kind: YM2151 → `OPM`, otherwise the OPN-family `OPNA`.
     private static func makeChip(kind: ChipKind, clock: UInt32) -> any FMCore {
         switch kind {
-        case .opm:         return OPM(clock: Double(clock))
-        case .opn, .opna:  return OPNA(clock: Double(clock), kind: kind)
+        case .opm:                return OPM(clock: Double(clock))
+        case .opn, .opna, .opn2:  return OPNA(clock: Double(clock), kind: kind)
         }
     }
 
