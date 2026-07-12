@@ -14,7 +14,10 @@
 /// Per-operator MUL scales that.
 /// Which OPN-family chip is being emulated. The single chip-selector type across the
 /// library: parsers, `ChipVoice`, and `OPNA` all speak `ChipKind`.
-public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */, opn2 /* YM2612 */, opm /* YM2151 */ }
+public enum ChipKind {
+    case opn /* YM2203 */, opna /* YM2608 */, opn2 /* YM2612 */, opm /* YM2151 */
+    case sn76489 /* SMS/MD PSG (not an FM chip, but selected the same way) */
+}
 
 /// Shared chip interface so `ChipVoice` can hold either an OPN-family (`OPNA`) or an OPM
 /// (`OPM`) core behind one slot. Mutation goes through the existential in place, so the

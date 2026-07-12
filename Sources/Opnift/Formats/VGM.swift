@@ -4,8 +4,7 @@ import Foundation
 ///
 /// Supports YM2203 (OPN), YM2608 (OPNA), YM2612 (OPN2) and YM2151 (OPM) chips. Timing is
 /// in 44100 Hz samples. The YM2151 path is what plays X68000 VGMs (FM via OPM cmd 0x54);
-/// the YM2612 path plays Mega Drive VGMs (FM + ch6 DAC — the console's SN76489 PSG is
-/// not yet modeled).
+/// the YM2612 + SN76489 pair plays Mega Drive VGMs (FM, ch6 DAC and the PSG).
 public struct VGM {
 
     public enum ParseError: Error { case badMagic, truncated, noSupportedChip }
@@ -15,6 +14,7 @@ public struct VGM {
     public let ym2608Clock: UInt32
     public let ym2612Clock: UInt32
     public let ym2151Clock: UInt32
+    public let sn76489Clock: UInt32
     public let totalSamples: UInt32
     public let dump: [UInt8]
     public let loopIndex: Int?
@@ -24,6 +24,7 @@ public struct VGM {
             : ym2608Clock != 0 ? ym2608Clock
             : ym2612Clock != 0 ? ym2612Clock
             : ym2151Clock != 0 ? ym2151Clock
+            : sn76489Clock != 0 ? sn76489Clock
             : OPNA.defaultClockHz
     }
 
@@ -68,8 +69,13 @@ public struct VGM {
         let hasV110Clocks = version >= 0x110
         ym2612Clock = (hasV110Clocks && 0x2C + 4 <= dataOffset) ? u32(0x2C) & clockMask : 0
         ym2151Clock = (hasV110Clocks && 0x30 + 4 <= dataOffset) ? u32(0x30) & clockMask : 0
+        // The SN76489 clock field at 0x0C dates to VGM v1.00 — always in the header.
+        // (The v1.51 LFSR-pattern/width fields at 0x28/0x2A are not read; the Sega
+        // integrated variant's taps 0x0009 / 16-bit width are assumed.)
+        sn76489Clock = u32(0x0C) & clockMask
 
-        guard ym2203Clock != 0 || ym2608Clock != 0 || ym2612Clock != 0 || ym2151Clock != 0 else {
+        guard ym2203Clock != 0 || ym2608Clock != 0 || ym2612Clock != 0 || ym2151Clock != 0
+                || sn76489Clock != 0 else {
             throw ParseError.noSupportedChip
         }
         dump = Array(bytes[dataOffset...])
@@ -96,6 +102,7 @@ public final class VGMPlayer: OPNStreamPlayer {
     private let ym2608: ChipVoice?   // VGM cmd 0x56 (port 0) / 0x57 (port 1)
     private let ym2612: ChipVoice?   // VGM cmd 0x52 (port 0) / 0x53 (port 1)
     private let ym2151: ChipVoice?   // VGM cmd 0x54 (OPM, single port)
+    private let sn76489: ChipVoice?  // VGM cmd 0x50 (single write port)
     private let outputFramesPerVGMSample: Double
 
     // YM2612 PCM data bank (VGM data blocks type 0x00) and its read cursor. Cmd
@@ -113,12 +120,15 @@ public final class VGMPlayer: OPNStreamPlayer {
             ? ChipVoice(kind: .opn2, clock: song.ym2612Clock, sampleRate: Int(sampleRate)) : nil
         let vM = song.ym2151Clock != 0
             ? ChipVoice(kind: .opm, clock: song.ym2151Clock, sampleRate: Int(sampleRate)) : nil
+        let vP = song.sn76489Clock != 0
+            ? ChipVoice(kind: .sn76489, clock: song.sn76489Clock, sampleRate: Int(sampleRate)) : nil
         self.ym2203 = v3
         self.ym2608 = v8
         self.ym2612 = v12
         self.ym2151 = vM
+        self.sn76489 = vP
         self.outputFramesPerVGMSample = sampleRate / 44100.0
-        super.init(voices: [v3, v8, v12, vM].compactMap { $0 }, outputSampleRate: sampleRate)
+        super.init(voices: [v3, v8, v12, vM, vP].compactMap { $0 }, outputSampleRate: sampleRate)
         pos = 0
     }
 
@@ -135,7 +145,7 @@ public final class VGMPlayer: OPNStreamPlayer {
         switch cmd {
         case 0x30...0x3F:        return 1
         case 0x40...0x4E:        return 2
-        case 0x4F, 0x50:         return 1
+        case 0x4F:               return 1    // Game Gear PSG stereo — not modeled
         case 0x51...0x5F:        return 2
         case 0x68:               return 11   // PCM RAM write
         case 0x90, 0x91, 0x95:   return 4    // DAC stream control
@@ -155,6 +165,9 @@ public final class VGMPlayer: OPNStreamPlayer {
         let cmd = dump[pos]; pos += 1
 
         switch cmd {
+        case 0x50:  // SN76489 command byte
+            guard pos < dump.count else { ended = true; return }
+            sn76489?.writeRegister(port: 0, address: 0, data: dump[pos]); pos += 1
         case 0x52:  // YM2612 port 0
             guard pos + 1 < dump.count else { ended = true; return }
             ym2612?.writeRegister(port: 0, address: dump[pos], data: dump[pos + 1]); pos += 2

@@ -22,10 +22,12 @@ public final class ChipVoice {
         self.resampler = Resampler(inputRate: chip.sampleRate, outputRate: Double(sampleRate))
     }
 
-    /// Build the concrete chip core for a kind: YM2151 → `OPM`, otherwise the OPN-family `OPNA`.
+    /// Build the concrete chip core for a kind: YM2151 → `OPM`, SN76489 → the PSG,
+    /// otherwise the OPN-family `OPNA`.
     private static func makeChip(kind: ChipKind, clock: UInt32) -> any FMCore {
         switch kind {
         case .opm:                return OPM(clock: Double(clock))
+        case .sn76489:            return SN76489(clock: Double(clock))
         case .opn, .opna, .opn2:  return OPNA(clock: Double(clock), kind: kind)
         }
     }
