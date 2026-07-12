@@ -25,6 +25,9 @@ public struct FMChannel {
     public var totalLevel: [UInt8] = [0, 0, 0, 0]
     /// Per-operator frequency multiple (MUL), 0…15 (0 means ×0.5).
     public var multiple: [UInt8] = [1, 1, 1, 1]
+    /// Per-operator LFO AM enable (reg 0x60 bit 7): whether `next(amOffset:)`'s
+    /// tremolo offset applies to this operator.
+    public var amEnable: [Bool] = [false, false, false, false]
 
     public var operators: [Operator]
     public var envelopes: [EnvelopeGenerator]
@@ -84,17 +87,26 @@ public struct FMChannel {
     }
 
     @inline(__always)
-    private func attenuation(_ i: Int) -> UInt32 {
+    private func attenuation(_ i: Int, _ amOffset: UInt32) -> UInt32 {
+        // amOffset is in the EG's 10-bit units, so it scales up like the envelope.
+        // ymfm clamps the 10-bit sum at 0x3FF; we skip that because anything at or past
+        // the clamp is ≥ 13 octaves down and reads as 0 from the volume table anyway.
         (UInt32(envelopes[i].attenuation) << 2) + (UInt32(totalLevel[i]) << 5)
+            + (amEnable[i] ? amOffset << 2 : 0)
     }
 
     @inline(__always)
-    private func sample(_ i: Int, modulation: Int32) -> Int32 {
-        Operator.sample(phase: operators[i].phase, modulation: modulation, attenuation: attenuation(i))
+    private func sample(_ i: Int, modulation: Int32, amOffset: UInt32) -> Int32 {
+        Operator.sample(phase: operators[i].phase, modulation: modulation, attenuation: attenuation(i, amOffset))
     }
 
     /// Produce one output sample. Does not clock envelopes (call `clockEnvelopes`).
-    public mutating func next() -> Int32 {
+    /// `amOffset` is the chip LFO's tremolo attenuation for this channel (10-bit EG
+    /// units); it lands only on operators with `amEnable` set.
+    public mutating func next(amOffset: UInt32 = 0) -> Int32 {
+        @inline(__always) func sample(_ i: Int, modulation: Int32) -> Int32 {
+            self.sample(i, modulation: modulation, amOffset: amOffset)
+        }
         // OP1, with feedback from its own last two outputs.
         let fbMod: Int32 = feedback == 0 ? 0 : (feedback0 &+ feedback1) >> (10 - Int32(feedback))
         let o0 = sample(0, modulation: fbMod)

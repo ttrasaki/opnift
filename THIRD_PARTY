@@ -20,6 +20,10 @@ on ymfm (file references are to ymfm's `src/ymfm_fm.ipp`, `ymfm_opn.cpp`,
     (Sources/Opnift/FMChannel.swift)
   * Key-code / KSR and the detune table (`dt_tab`)
     (Sources/Opnift/OPNA.swift)
+  * The LFO: counter/waveform logic (`clock_noise_and_lfo`), the rate table
+    (`lfo_max_count`), AM offset scaling, and the PM depth table
+    (`s_lfo_pm_shifts` via `opn_lfo_pm_phase_adjustment`)
+    (Sources/Opnift/OPNA.swift)
   * The SSG tone/noise/mixer model and the volume-to-amplitude table
     (Sources/Opnift/SSG.swift)
 
