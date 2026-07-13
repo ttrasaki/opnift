@@ -15,6 +15,10 @@ public struct VGM {
     public let ym2612Clock: UInt32
     public let ym2151Clock: UInt32
     public let sn76489Clock: UInt32
+    /// YM2413 (OPLL) clock. Opnift does not emulate the YM2413; the clock is exposed
+    /// only so callers can detect such files (e.g. SMS FM VGMs, which would otherwise
+    /// parse as SN76489-only) and route them to another engine.
+    public let ym2413Clock: UInt32
     public let totalSamples: UInt32
     public let dump: [UInt8]
     public let loopIndex: Int?
@@ -73,6 +77,9 @@ public struct VGM {
         // (The v1.51 LFSR-pattern/width fields at 0x28/0x2A are not read; the Sega
         // integrated variant's taps 0x0009 / 16-bit width are assumed.)
         sn76489Clock = u32(0x0C) & clockMask
+        // The YM2413 clock field at 0x10 also dates to VGM v1.00. Read for detection
+        // only (see the property comment); it never satisfies the supported-chip guard.
+        ym2413Clock = u32(0x10) & clockMask
 
         guard ym2203Clock != 0 || ym2608Clock != 0 || ym2612Clock != 0 || ym2151Clock != 0
                 || sn76489Clock != 0 else {
