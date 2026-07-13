@@ -179,7 +179,7 @@ public struct S98 {
         switch type {
         case 1: return .opna // YM2149 (PSG / SSG-only)
         case 2: return .opn  // YM2203 (OPN)   — master/72
-        case 3: return .opna // YM2612 (OPN2)  — master/144
+        case 3: return .opn2 // YM2612 (OPN2)  — master/144, no SSG
         case 4: return .opna // YM2608 (OPNA)  — master/144
         case 5: return .opm  // YM2151 (OPM)   — master/64 (X68000)
         default: return nil  // 0 = none, or a chip family we don't emulate

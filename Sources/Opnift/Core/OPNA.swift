@@ -3,10 +3,13 @@
 /// This wires the FM core to the Yamaha register map so a register stream (e.g. from
 /// S98) can drive it: `writeRegister(port:address:data:)` then `clock()` per sample.
 ///
-/// Scope: **FM only** for now. SSG, ADPCM-A/B, the rhythm section, timers and the LFO
-/// are accepted but ignored (the addresses are decoded and dropped) so a mostly-FM
-/// stream plays. CH3 special (per-operator frequency) mode and detune are not yet
-/// modeled. These are deliberate Phase-5 omissions, not bugs.
+/// Scope: **FM only** for now. SSG, ADPCM-A/B, the rhythm section and timers are
+/// accepted but ignored (the addresses are decoded and dropped) so a mostly-FM
+/// stream plays. CH3 special (per-operator frequency) mode is not yet modeled.
+/// These are deliberate Phase-5 omissions, not bugs.
+///
+/// LFO (reg 0x22 + per-channel AMS/PMS + per-operator AM enable) is modeled after
+/// ymfm's OPN implementation; the YM2203 (`.opn`) has no LFO so it's inert there.
 ///
 /// Frequency: at the native FM rate `clock / fmDivider` (~55466 Hz; OPNA/YM2608 =
 /// clock/144, OPN/YM2203 = clock/72), a 20-bit phase accumulator advances by
@@ -14,7 +17,10 @@
 /// Per-operator MUL scales that.
 /// Which OPN-family chip is being emulated. The single chip-selector type across the
 /// library: parsers, `ChipVoice`, and `OPNA` all speak `ChipKind`.
-public enum ChipKind { case opn /* YM2203 */, opna /* YM2608 */, opm /* YM2151 */ }
+public enum ChipKind {
+    case opn /* YM2203 */, opna /* YM2608 */, opn2 /* YM2612 */, opm /* YM2151 */
+    case sn76489 /* SMS/MD PSG (not an FM chip, but selected the same way) */
+}
 
 /// Shared chip interface so `ChipVoice` can hold either an OPN-family (`OPNA`) or an OPM
 /// (`OPM`) core behind one slot. Mutation goes through the existential in place, so the
@@ -41,9 +47,15 @@ public struct OPNA: FMCore {
     public let clock: Double
     /// The modeled chip family.
     public let kind: ChipKind
-    /// FM clock divider: OPN (YM2203) runs the FM engine at master/72, OPNA (YM2608) at
-    /// master/144. Both land near 55.5 kHz since OPNA's master clock is ~2× the OPN's.
+    /// FM clock divider: OPN (YM2203) runs the FM engine at master/72; OPNA (YM2608) and
+    /// OPN2 (YM2612) at master/144. All land near 55.5 kHz (OPN2 ≈ 53.3 kHz) since
+    /// OPNA/OPN2 master clocks are ~2× the OPN's.
     private var fmDivider: Double { kind == .opn ? 72.0 : 144.0 }
+    /// Whether the modeled chip has an SSG section (the OPN2/YM2612 dropped it).
+    private var hasSSG: Bool { kind != .opn2 }
+    /// Whether the modeled chip has an LFO (the OPN/YM2203 has none; OPNA and OPN2
+    /// share the same reg-0x22 LFO).
+    private var hasLFO: Bool { kind != .opn }
     /// Native FM synthesis sample rate (Hz).
     public var sampleRate: Double { clock / fmDivider }
 
@@ -79,6 +91,26 @@ public struct OPNA: FMCore {
     private var egDivider: Int = 0
     private var egCounter: UInt32 = 0
 
+    // LFO (one per chip): a triangle oscillator clocked once per FM sample, driving
+    // AM (tremolo, added to EG attenuation) and PM (vibrato, applied to fnum).
+    private var lfoEnabled = false
+    private var lfoRate: UInt8 = 0
+    private var lfoCounter: UInt32 = 0
+    /// Current AM triangle value (0…0x3F). Internal for tests.
+    private(set) var lfoAM: UInt32 = 0
+    /// Current raw PM triangle value (−7…+7). Internal for tests.
+    private(set) var lfoRawPM: Int32 = 0
+    // Per-channel LFO sensitivities (reg 0xB4 bits 4–5 / 0–2).
+    private var ams: [UInt8]
+    private var pms: [UInt8]
+
+    // OPN2 (YM2612) DAC: when enabled (reg 0x2B bit 7), channel 6's FM output is
+    // replaced by the last sample written to reg 0x2A. The 8-bit unsigned sample is
+    // mapped to the FM channels' ~13-bit signed range ((d − 0x80) << 6 → ±8128,
+    // matching the operators' ±8168 full scale).
+    private var dacEnabled = false
+    private var dacSample: Int32 = 0
+
     /// Register address offset → logical operator. Yamaha addresses operators in the
     /// slot order S1, S3, S2, S4.
     private static let slotToOperator: [Int] = [0, 2, 1, 3]
@@ -103,6 +135,26 @@ public struct OPNA: FMCore {
         8, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 20, 22, 22, 22, 22,
     ]
 
+    /// LFO sub-counter limit per rate (0…7). Derived by ymfm from the application
+    /// manual's frequencies assuming a 7-bit LFO; ported from ymfm's `lfo_max_count`.
+    /// BSD-3-Clause; see THIRD_PARTY.
+    private static let lfoMaxCount: [UInt8] = [109, 78, 72, 68, 63, 45, 9, 6]
+
+    /// PM depth table `[PMS 0…7][|pm| 0…7]`: each byte packs two right-shift amounts
+    /// (low/high nibble) applied to the top 7 fnum bits — a cheap multiply by a 0–2 bit
+    /// constant. Ported verbatim from ymfm's `s_lfo_pm_shifts` (written to match Nuked);
+    /// the values are measurement-derived, not derivable. BSD-3-Clause; see THIRD_PARTY.
+    private static let lfoPMShifts: [UInt8] = [
+        0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77,
+        0x77, 0x77, 0x77, 0x77, 0x72, 0x72, 0x72, 0x72,
+        0x77, 0x77, 0x77, 0x72, 0x72, 0x72, 0x17, 0x17,
+        0x77, 0x77, 0x72, 0x72, 0x17, 0x17, 0x12, 0x12,
+        0x77, 0x77, 0x72, 0x17, 0x17, 0x17, 0x12, 0x07,
+        0x77, 0x77, 0x17, 0x12, 0x07, 0x07, 0x02, 0x01,
+        0x77, 0x77, 0x17, 0x12, 0x07, 0x07, 0x02, 0x01,
+        0x77, 0x77, 0x17, 0x12, 0x07, 0x07, 0x02, 0x01,
+    ]
+
     public init(clock: Double = OPNA.defaultClock, kind: ChipKind = .opna) {
         self.clock = clock
         self.kind = kind
@@ -114,6 +166,8 @@ public struct OPNA: FMCore {
         detuneField = Array(repeating: [0, 0, 0, 0], count: 6)
         panLeft = Array(repeating: true, count: 6)
         panRight = Array(repeating: true, count: 6)
+        ams = Array(repeating: 0, count: 6)
+        pms = Array(repeating: 0, count: 6)
 
         dcBlockL.configure(cutoff: 10, sampleRate: sampleRate)
         dcBlockR.configure(cutoff: 10, sampleRate: sampleRate)
@@ -128,12 +182,28 @@ public struct OPNA: FMCore {
             keyOnOff(data)
             return
         }
-        // SSG registers (port 0, 0x00–0x0F).
+        // SSG registers (port 0, 0x00–0x0F). The OPN2 has no SSG; on it these addresses
+        // are unmapped, so drop the write rather than exciting a phantom SSG.
         if port == 0 && address < 0x10 {
-            ssg.writeRegister(address, data)
+            if hasSSG { ssg.writeRegister(address, data) }
             return
         }
-        // Timer / LFO / prescaler / ADPCM live below 0x30 — decoded but ignored.
+        // OPN2 DAC (port 0): 0x2A latches a sample, 0x2B bit 7 swaps it in for ch6 FM.
+        if kind == .opn2 && port == 0 {
+            if address == 0x2A { dacSample = (Int32(data) - 0x80) << 6; return }
+            if address == 0x2B { dacEnabled = (data & 0x80) != 0; return }
+        }
+        // LFO control (port 0, 0x22): bit 3 = enable, bits 0–2 = rate. The YM2203 has
+        // no LFO, so the write is dropped there. Disabling parks the counter at 0
+        // (handled in clockLFO), so re-enabling restarts from phase 0.
+        if port == 0 && address == 0x22 {
+            if hasLFO {
+                lfoEnabled = (data & 0x08) != 0
+                lfoRate = data & 0x07
+            }
+            return
+        }
+        // Timer / prescaler / ADPCM live below 0x30 — decoded but ignored.
         if address < 0x30 { return }
 
         let column = Int(address & 0x03)
@@ -167,6 +237,7 @@ public struct OPNA: FMCore {
             updateKeyScale(ch, op)
         case 0x60: // AM / D1R
             channels[ch].envelopes[op].decayRate = data & 0x1F
+            if hasLFO { channels[ch].amEnable[op] = (data & 0x80) != 0 }
         case 0x70: // D2R
             channels[ch].envelopes[op].sustainRate = data & 0x1F
         case 0x80: // SL / RR
@@ -198,6 +269,10 @@ public struct OPNA: FMCore {
         case 0x04: // 0xB4–0xB6: L / R / AMS / PMS
             panLeft[ch] = (data & 0x80) != 0
             panRight[ch] = (data & 0x40) != 0
+            if hasLFO {
+                ams[ch] = (data >> 4) & 0x03
+                pms[ch] = data & 0x07
+            }
         default:
             break
         }
@@ -214,7 +289,26 @@ public struct OPNA: FMCore {
     // MARK: Pitch helpers
 
     private mutating func updatePitch(_ ch: Int) {
-        let base = Int32((UInt32(fnum[ch]) << block[ch]) >> 1)
+        refreshPhaseIncrements(ch, rawPM: lfoRawPM)
+        for op in 0..<4 { updateKeyScale(ch, op) }
+    }
+
+    /// Recompute all four operators' phase increments from the held pitch state,
+    /// with the LFO's raw PM value folded into fnum (ymfm `compute_phase_step`).
+    ///
+    /// With `pms == 0` this is bit-identical to the pre-LFO computation: the fnum is
+    /// widened to ymfm's 12-bit domain (`fnum << 1`, so the PM adjustment lands at the
+    /// hardware's resolution) and the block shift compensates with `>> 2` instead of
+    /// `>> 1`. Called per register write normally, and per sample while PMS ≠ 0.
+    private mutating func refreshPhaseIncrements(_ ch: Int, rawPM: Int32) {
+        var fnum12 = UInt32(fnum[ch]) << 1
+        if pms[ch] != 0 {
+            let adjust = OPNA.lfoPMAdjustment(fnumTop: UInt32(fnum[ch] >> 4),
+                                              sensitivity: pms[ch], rawPM: rawPM)
+            fnum12 = UInt32(bitPattern: Int32(fnum12) &+ adjust) & 0xFFF
+        }
+        let base = Int32((fnum12 << block[ch]) >> 2)
+        // Keycode (and thus detune) uses the unmodulated fnum, as on hardware.
         let keycode = Int((UInt8(block[ch]) << 2) | OPNA.fkTable[Int(fnum[ch] >> 7)])
         for op in 0..<4 {
             // Detune nudges the phase increment a few units around the base frequency.
@@ -225,8 +319,18 @@ public struct OPNA: FMCore {
             let mul = channels[ch].multiple[op]
             let inc = (mul == 0) ? (UInt32(detuned) >> 1) : (UInt32(detuned) &* UInt32(mul))
             channels[ch].operators[op].phaseIncrement = inc & Operator.phaseMask
-            updateKeyScale(ch, op)
         }
+    }
+
+    /// Signed fnum adjustment for the LFO PM (ymfm `opn_lfo_pm_phase_adjustment`).
+    /// `fnumTop` is the top 7 bits of the 11-bit fnum.
+    private static func lfoPMAdjustment(fnumTop: UInt32, sensitivity: UInt8, rawPM: Int32) -> Int32 {
+        let absPM = rawPM < 0 ? -rawPM : rawPM
+        let shifts = lfoPMShifts[Int(sensitivity) * 8 + Int(absPM & 7)]
+        var adjust = Int32(fnumTop >> (shifts & 0x0F)) &+ Int32(fnumTop >> (shifts >> 4))
+        if sensitivity > 5 { adjust <<= (sensitivity - 5) }
+        adjust >>= 2
+        return rawPM < 0 ? -adjust : adjust
     }
 
     private mutating func updateKeyScale(_ ch: Int, _ op: Int) {
@@ -235,10 +339,52 @@ public struct OPNA: FMCore {
         channels[ch].envelopes[op].keyScale = keycode >> (3 - ks)
     }
 
+    // MARK: LFO
+
+    /// Clock the LFO one FM sample (ymfm `clock_noise_and_lfo`), updating `lfoAM` and
+    /// `lfoRawPM`.
+    private mutating func clockLFO() {
+        guard hasLFO && lfoEnabled else {
+            lfoCounter = 0
+            // Disabled parks the counter at 0, where the AM triangle reads 0x3F (the
+            // first half is inverted). Operators with AM enabled expect that extra
+            // attenuation even with the LFO off (ymfm cites MegaDrive Venom); AMS = 0
+            // still shifts it to 0. The OPN has no LFO at all, so 0 there.
+            lfoAM = hasLFO ? 0x3F : 0
+            lfoRawPM = 0
+            return
+        }
+        // 8-bit sub-counter divides the sample clock; the 7-bit LFO position lives at
+        // bits 8–14. The 0x101 (not 0x100) reload reproduces the hardware's off-by-one
+        // that makes the real rates slightly faster than the published ones.
+        let subcount = lfoCounter & 0xFF
+        lfoCounter &+= 1
+        if subcount >= UInt32(OPNA.lfoMaxCount[Int(lfoRate)]) {
+            lfoCounter &+= 0x101 - subcount
+        }
+        // AM: low 6 bits of the position, first half-period (bit 14 == 0) inverted →
+        // a 0…0x3F triangle.
+        lfoAM = (lfoCounter >> 8) & 0x3F
+        if (lfoCounter >> 14) & 1 == 0 { lfoAM ^= 0x3F }
+        // PM: bits 10–12, reflected by bit 13 and negated by bit 14 → −7…+7 triangle.
+        var pm = Int32((lfoCounter >> 10) & 7)
+        if (lfoCounter >> 13) & 1 != 0 { pm ^= 7 }
+        lfoRawPM = (lfoCounter >> 14) & 1 != 0 ? -pm : pm
+    }
+
+    /// AM attenuation offset for a channel, in the EG's 10-bit units
+    /// (ymfm `lfo_am_offset`). AMS 0…3 → max depth 0 / 1.4 / 5.9 / 11.8 dB.
+    @inline(__always)
+    private func amOffset(_ ch: Int) -> UInt32 {
+        let shift = (1 << (ams[ch] ^ 3)) - 1 // AMS 0…3 → shift 7, 3, 1, 0
+        return (lfoAM << 1) >> shift
+    }
+
     // MARK: Clock
 
     /// Produce one stereo sample. L/R are unscaled sums (mixing/clamping is Phase 6).
     public mutating func tick() -> (left: Int32, right: Int32) {
+        clockLFO()
         egDivider += 1
         if egDivider >= 3 {
             egDivider = 0
@@ -249,7 +395,11 @@ public struct OPNA: FMCore {
         var left: Int32 = 0
         var right: Int32 = 0
         for ch in 0..<6 {
-            let sample = channels[ch].next()
+            // PM moves fnum every sample, so channels with PMS ≠ 0 recompute their
+            // phase increments here; PMS = 0 channels keep the write-time values.
+            if pms[ch] != 0 { refreshPhaseIncrements(ch, rawPM: lfoRawPM) }
+            // OPN2 DAC replaces channel 6's FM output while enabled.
+            let sample = (ch == 5 && dacEnabled) ? dacSample : channels[ch].next(amOffset: amOffset(ch))
             if panLeft[ch] { left &+= sample }
             if panRight[ch] { right &+= sample }
         }
@@ -266,14 +416,16 @@ public struct OPNA: FMCore {
         // harmonics land mid-band as an audible metallic ring (e.g. a +25 dB spur near
         // 6.9 kHz vs the fmgen golden). The boxcar nulls the harmonics at multiples of
         // the sub-clock rate and cheaply band-limits before we sample at the FM rate.
-        var ssgAccum: Int32 = 0
-        for _ in 0..<OPNA.ssgClocksPerSample {
-            ssg.clock()
-            ssgAccum &+= ssg.output()
+        if hasSSG {
+            var ssgAccum: Int32 = 0
+            for _ in 0..<OPNA.ssgClocksPerSample {
+                ssg.clock()
+                ssgAccum &+= ssg.output()
+            }
+            let ssgSample = Int32(Double(ssgAccum) / Double(OPNA.ssgClocksPerSample) * ssgVolume)
+            left &+= ssgSample
+            right &+= ssgSample
         }
-        let ssgSample = Int32(Double(ssgAccum) / Double(OPNA.ssgClocksPerSample) * ssgVolume)
-        left &+= ssgSample
-        right &+= ssgSample
 
         // AC-couple (remove the SSG's DC offset / envelope shadow), like the real output.
         left = Int32(dcBlockL.process(Double(left)))
