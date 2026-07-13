@@ -44,7 +44,10 @@ public struct FMChannel {
     // MARK: Gate
 
     public mutating func keyOn() {
-        for i in 0..<4 { envelopes[i].keyOn() }
+        for i in 0..<4 {
+            operators[i].phase = 0
+            envelopes[i].keyOn()
+        }
     }
 
     public mutating func keyOff() {
@@ -53,10 +56,17 @@ public struct FMChannel {
 
     /// Set the per-operator key state from a 4-bit slot mask (bit i = OP(i+1)).
     /// Only edges act: a slot rising keys on (retrigger), falling keys off.
+    ///
+    /// Key-on resets the operator's phase counter to 0, as on hardware (ymfm/Nuked do
+    /// the same in `start_attack`). Without the reset, operators that share the exact
+    /// same frequency (e.g. equal MUL and DT) keep whatever relative phase history
+    /// left behind, and their sum can sit anywhere between coherent (+full level) and
+    /// destructive (nearly silent) — audibly wrong levels on multi-carrier patches.
     public mutating func setKeyState(slots: UInt8) {
         let changed = slots ^ keyLatch
         for i in 0..<4 where (changed & (1 << i)) != 0 {
             if (slots & (1 << i)) != 0 {
+                operators[i].phase = 0
                 envelopes[i].keyOn()
             } else {
                 envelopes[i].keyOff()
