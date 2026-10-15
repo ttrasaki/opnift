@@ -5,14 +5,17 @@ import Testing
 struct FMChannelTests {
 
     /// A channel whose envelopes have settled at full volume (attenuation 0).
-    /// Default envelope = AR 31, DR 0, SL 0 → attacks to 0 and holds.
+    /// Envelope = AR 31, DR 0, SL 0 → attacks to 0 and holds.
     private func settledChannel(algorithm: UInt8, feedback: UInt8 = 0,
                                 totalLevel: [UInt8] = [0, 0, 0, 0]) -> FMChannel {
         var ch = FMChannel()
         ch.algorithm = algorithm
         ch.feedback = feedback
         ch.totalLevel = totalLevel
-        for i in 0..<4 { ch.operators[i].phaseIncrement = 1 << Operator.waveformShift }
+        for i in 0..<4 {
+            ch.operators[i].phaseIncrement = 1 << Operator.waveformShift
+            ch.envelopes[i].attackRate = 31
+        }
         ch.keyOn()
         for c in 0..<UInt32(256) { ch.clockEnvelopes(c) }
         for env in ch.envelopes { #expect(env.attenuation == 0) }

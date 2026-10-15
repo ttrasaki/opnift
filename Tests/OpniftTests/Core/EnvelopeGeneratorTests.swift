@@ -55,10 +55,21 @@ struct EnvelopeGeneratorTests {
         // Lands at/just past the SL threshold (6 << 5 = 192).
         #expect(eg.attenuation >= 192)
         #expect(eg.attenuation < 192 + 16)
-        // D2R 0 advances only via the slowest pattern — effectively held.
+        // D2R 0 holds the level exactly, even with key scaling.
+        eg.keyScale = 15
         let held = eg.attenuation
-        for _ in 0..<2000 { eg.clock(counter); counter &+= 1 }
-        #expect(Int(eg.attenuation) - Int(held) <= 1)
+        for _ in 0..<200_000 { eg.clock(counter); counter &+= 1 }
+        #expect(eg.attenuation == held)
+    }
+
+    @Test("default (unwritten) patch stays silent on key-on")
+    func defaultPatchSilent() {
+        var eg = EnvelopeGenerator()
+        eg.keyScale = 15 // AR 0 must not attack even with key scaling
+        eg.keyOn()
+        var counter: UInt32 = 0
+        for _ in 0..<200_000 { eg.clock(counter); counter &+= 1 }
+        #expect(eg.attenuation == EnvelopeGenerator.maxAttenuation)
     }
 
     @Test("attenuation is monotonic non-decreasing through decay")
