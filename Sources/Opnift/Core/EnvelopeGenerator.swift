@@ -25,8 +25,9 @@ public struct EnvelopeGenerator {
 
     // MARK: Register parameters (raw Yamaha fields)
 
-    /// Attack rate, 5-bit (0…31).
-    public var attackRate: UInt8 = 31
+    /// Attack rate, 5-bit (0…31). Power-on registers are zero, so an operator whose
+    /// patch was never written stays silent on key-on (AR 0 never attacks).
+    public var attackRate: UInt8 = 0
     /// First decay rate (D1R), 5-bit (0…31).
     public var decayRate: UInt8 = 0
     /// Second decay / sustain rate (D2R), 5-bit (0…31).
@@ -78,6 +79,10 @@ public struct EnvelopeGenerator {
         case .off:     return
         }
 
+        // Effective rate 0 (raw rate 0) freezes the envelope: AR 0 never attacks and
+        // D1R/D2R 0 hold the level.
+        if rate == 0 { return }
+
         // Attack rates 62/63 snap straight to peak.
         if state == .attack && rate >= 62 {
             level = 0
@@ -122,9 +127,10 @@ public struct EnvelopeGenerator {
 
     // MARK: Rate helpers
 
+    /// A raw rate of 0 stays 0 regardless of key scaling (as on hardware / ymfm).
     @inline(__always)
     func effectiveRate(_ raw: UInt8) -> UInt8 {
-        UInt8(min(63, 2 * Int(raw) + Int(keyScale)))
+        raw == 0 ? 0 : UInt8(min(63, 2 * Int(raw) + Int(keyScale)))
     }
 
     @inline(__always)
